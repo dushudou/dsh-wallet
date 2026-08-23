@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSH 钱包设置模块设计稿</title>
+<style>
+  :root {
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #242424;
+    --bg-tertiary: #2d2d2d;
+    --bg-hover: #333333;
+    --bg-active: #3a3a3a;
+    --border: #383838;
+    --border-light: #404040;
+    --text-primary: #ffffff;
+    --text-secondary: #a0a0a0;
+    --text-tertiary: #6e6e6e;
+    --accent: #4a9eff;
+    --success: #4ade80;
+    --warning: #fbbf24;
+    --danger: #f87171;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 20px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: #0d0d0d;
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+  }
+  .settings-panel {
+    width: 100%;
+    max-width: 960px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-xl);
+    overflow: hidden;
+    display: flex;
+    min-height: 680px;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+  }
+  .sidebar {
+    width: 200px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    padding: 24px 12px;
+    flex-shrink: 0;
+  }
+  .sidebar-title {
+    font-size: 20px;
+    font-weight: 600;
+    padding: 0 12px 20px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    font-size: 15px;
+    color: var(--text-secondary);
+    transition: all 0.15s ease;
+    margin-bottom: 2px;
+  }
+  .nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .nav-item.active { background: var(--bg-active); color: var(--text-primary); font-weight: 500; }
+  .nav-icon { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .content { flex: 1; padding: 28px 32px; overflow-y: auto; }
+  .content-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+  .content-title { font-size: 22px; font-weight: 600; }
+  .content-desc { font-size: 14px; color: var(--text-secondary); margin-top: 4px; }
+  .header-actions { display: flex; gap: 8px; }
+  .status-banner {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; background: var(--bg-tertiary);
+    border-radius: var(--radius-md); margin-bottom: 24px; border: 1px solid var(--border);
+  }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.unlocked { background: var(--success); box-shadow: 0 0 8px rgba(74,222,128,0.4); }
+  .status-text { flex: 1; font-size: 14px; }
+  .status-text strong { color: var(--text-primary); }
+  .status-text span { color: var(--text-secondary); }
+  .section { margin-bottom: 28px; }
+  .section-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .section-title .badge { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 10px; background: var(--bg-tertiary); color: var(--text-secondary); }
+  .card-list { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    background: var(--bg-tertiary); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 16px 18px; transition: all 0.15s ease;
+  }
+  .card:hover { border-color: var(--border-light); background: var(--bg-hover); }
+  .card-row { display: flex; align-items: center; justify-content: space-between; }
+  .card-left { display: flex; align-items: center; gap: 14px; flex: 1; min-width: 0; }
+  .card-icon { width: 40px; height: 40px; border-radius: var(--radius-sm); background: var(--bg-active); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .card-info { flex: 1; min-width: 0; }
+  .card-name { font-size: 15px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+  .card-address { font-size: 13px; color: var(--text-tertiary); font-family: "SF Mono", "Monaco", monospace; margin-top: 2px; }
+  .card-balance { text-align: right; flex-shrink: 0; }
+  .card-balance .amount { font-size: 15px; font-weight: 500; }
+  .card-balance .fiat { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
+  .card-actions { display: flex; gap: 6px; margin-left: 12px; }
+  .tag { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 6px; background: var(--bg-active); color: var(--text-secondary); }
+  .tag.generated { background: rgba(74,158,255,0.15); color: var(--accent); }
+  .tag.imported { background: rgba(251,191,36,0.15); color: var(--warning); }
+  .btn {
+    padding: 7px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
+    cursor: pointer; border: 1px solid var(--border-light); background: transparent;
+    color: var(--text-secondary); transition: all 0.15s ease; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-tertiary); }
+  .btn-ghost { border: none; padding: 6px 10px; }
+  .add-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 14px; border: 1.5px dashed var(--border-light);
+    border-radius: var(--radius-md); background: transparent; color: var(--text-secondary);
+    font-size: 14px; cursor: pointer; transition: all 0.15s ease; margin-top: 4px;
+  }
+  .add-btn:hover { border-color: var(--text-tertiary); color: var(--text-primary); background: var(--bg-tertiary); }
+  .add-btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px; }
+  .collapse-card { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; margin-bottom: 10px; }
+  .collapse-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; cursor: pointer; transition: background 0.15s ease; }
+  .collapse-header:hover { background: var(--bg-hover); }
+  .collapse-title { font-size: 15px; font-weight: 500; }
+  .collapse-desc { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+  .collapse-arrow { color: var(--text-tertiary); transition: transform 0.2s ease; flex-shrink: 0; }
+  .collapse-card.open .collapse-arrow { transform: rotate(180deg); }
+  .collapse-body { display: none; padding: 0 18px 18px; border-top: 1px solid var(--border); }
+  .collapse-card.open .collapse-body { display: block; padding-top: 16px; }
+  .setting-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .setting-row:last-child { border-bottom: none; }
+  .setting-label { font-size: 14px; }
+  .setting-hint { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
+  .select {
+    padding: 7px 32px 7px 14px; border-radius: 20px; border: 1px solid var(--border-light);
+    background: var(--bg-tertiary); color: var(--text-primary); font-size: 13px;
+    cursor: pointer; appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg width='12' height='12' viewBox='0 0 12 12' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%236e6e6e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; min-width: 140px;
+  }
+  .toggle {
+    width: 40px; height: 22px; border-radius: 11px; background: var(--bg-active);
+    border: 1px solid var(--border-light); cursor: pointer; position: relative; transition: all 0.2s ease; flex-shrink: 0;
+  }
+  .toggle::after { content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: var(--text-tertiary); top: 2px; left: 2px; transition: all 0.2s ease; }
+  .toggle.on { background: var(--accent); border-color: var(--accent); }
+  .toggle.on::after { left: 20px; background: white; }
+  .tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .tab { padding: 8px 0; font-size: 14px; color: var(--text-secondary); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: all 0.15s ease; }
+  .tab:hover { color: var(--text-primary); }
+  .tab.active { color: var(--text-primary); border-bottom-color: var(--text-primary); font-weight: 500; }
+  .audit-list { display: flex; flex-direction: column; gap: 1px; background: var(--border); border-radius: var(--radius-md); overflow: hidden; }
+  .audit-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--bg-tertiary); font-size: 13px; }
+  .audit-time { color: var(--text-tertiary); font-size: 12px; font-family: "SF Mono", monospace; flex-shrink: 0; width: 70px; }
+  .audit-kind { font-weight: 500; flex-shrink: 0; width: 120px; }
+  .audit-detail { color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .audit-effect { font-size: 11px; padding: 2px 8px; border-radius: 6px; flex-shrink: 0; }
+  .audit-effect.allow { background: rgba(74,222,128,0.15); color: var(--success); }
+  .audit-effect.deny { background: rgba(248,113,113,0.15); color: var(--danger); }
+  .audit-effect.ask { background: rgba(251,191,36,0.15); color: var(--warning); }
+  .preset-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .preset-card { padding: 14px 16px; border-radius: var(--radius-md); border: 1.5px solid var(--border); cursor: pointer; transition: all 0.15s ease; background: var(--bg-tertiary); }
+  .preset-card:hover { border-color: var(--border-light); }
+  .preset-card.selected { border-color: var(--accent); background: rgba(74,158,255,0.08); }
+  .preset-name { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .preset-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+  .design-note { position: fixed; bottom: 16px; right: 16px; font-size: 12px; color: var(--text-tertiary); background: var(--bg-secondary); padding: 8px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="settings-panel">
+  <div class="sidebar">
+    <div class="sidebar-title">设置</div>
+    <div class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+      通用设置
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span>
+      模型
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>
+      插件
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg></span>
+      Agent 预设
+    </div>
+    <div class="nav-item active">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></span>
+      钱包
+    </div>
+  </div>
+  <div class="content">
+    <div class="content-header">
+      <div>
+        <div class="content-title">钱包</div>
+        <div class="content-desc">管理加密账户、签名策略与安全设置。所有密钥本地加密存储，AI 签名需经策略授权。</div>
+      </div>
+      <div class="header-actions"><button class="btn">打开配置文件</button></div>
+    </div>
+    <div class="status-banner">
+      <div class="status-dot unlocked"></div>
+      <div class="status-text"><strong>已解锁</strong><span> · 3 个账户 · 策略：strict · 自动锁定 15 分钟</span></div>
+      <button class="btn btn-ghost">锁定</button>
+    </div>
+    <div class="section">
+      <div class="section-title">账户 <span class="badge">3</span></div>
+      <div class="card-list">
+        <div class="card">
+          <div class="card-row">
+            <div class="card-left">
+              <div class="card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4a9eff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="22" y1="10" x2="2" y2="10"/></svg></div>
+              <div class="card-info">
+                <div class="card-name">Main <span class="tag generated">生成</span></div>
+                <div class="card-address">0xf39F...2266</div>
+              </div>
+            </div>
+            <div class="card-balance"><div class="amount">1.245 ETH</div><div class="fiat">≈ $3,412.50</div></div>
+            <div class="card-actions"><button class="btn btn-ghost">详情</button></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-row">
+            <div class="card-left">
+              <div class="card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg></div>
+              <div class="card-info">
+                <div class="card-name">Trading <span class="tag imported">导入</span></div>
+                <div class="card-address">0x7099...c79C8</div>
+              </div>
+            </div>
+            <div class="card-balance"><div class="amount">0.082 ETH</div><div class="fiat">≈ $224.80</div></div>
+            <div class="card-actions"><button class="btn btn-ghost">详情</button></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-row">
+            <div class="card-left">
+              <div class="card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4a9eff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="22" y1="10" x2="2" y2="10"/></svg></div>
+              <div class="card-info">
+                <div class="card-name">Testnet <span class="tag generated">生成</span></div>
+                <div class="card-address">0x3C44...7718</div>
+              </div>
+            </div>
+            <div class="card-balance"><div class="amount">5.0 SepoliaETH</div><div class="fiat">测试网</div></div>
+            <div class="card-actions"><button class="btn btn-ghost">详情</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="add-btn-group">
+        <button class="add-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>生成新账户</button>
+        <button class="add-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>导入账户</button>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">签名策略</div>
+      <div class="tabs">
+        <div class="tab active">预设</div>
+        <div class="tab">自定义规则</div>
+      </div>
+      <div class="preset-grid">
+        <div class="preset-card"><div class="preset-name">🔒 Locked</div><div class="preset-desc">拒绝所有签名请求，只读模式</div></div>
+        <div class="preset-card selected"><div class="preset-name">🛡️ Strict</div><div class="preset-desc">所有签名需人工确认，大额直接拒绝</div></div>
+        <div class="preset-card"><div class="preset-name">🧪 Testnet</div><div class="preset-desc">测试网自动签名，主网需确认</div></div>
+        <div class="preset-card"><div class="preset-name">⚡ Power</div><div class="preset-desc">主网小额自动签名，大额需确认</div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">安全设置</div>
+      <div class="collapse-card open">
+        <div class="collapse-header" onclick="this.parentElement.classList.toggle('open')">
+          <div><div class="collapse-title">金库与锁定</div><div class="collapse-desc">自动锁定、密码管理、密钥存储位置</div></div>
+          <svg class="collapse-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="collapse-body">
+          <div class="setting-row">
+            <div><div class="setting-label">自动锁定</div><div class="setting-hint">无操作后自动锁定金库</div></div>
+            <select class="select"><option>5 分钟</option><option selected>15 分钟</option><option>30 分钟</option><option>1 小时</option><option>从不</option></select>
+          </div>
+          <div class="setting-row">
+            <div><div class="setting-label">金库存储位置</div><div class="setting-hint">~/.dsh/wallet</div></div>
+            <button class="btn">更改</button>
+          </div>
+          <div class="setting-row">
+            <div><div class="setting-label">密码模式</div><div class="setting-hint">auto：凭据存储自动生成</div></div>
+            <select class="select"><option selected>auto</option><option>env</option><option>manual</option></select>
+          </div>
+          <div class="setting-row">
+            <div><div class="setting-label">签名前二次确认</div><div class="setting-hint">即使策略允许，也弹出确认对话框</div></div>
+            <div class="toggle"></div>
+          </div>
+        </div>
+      </div>
+      <div class="collapse-card">
+        <div class="collapse-header" onclick="this.parentElement.classList.toggle('open')">
+          <div><div class="collapse-title">链与 RPC</div><div class="collapse-desc">配置自定义 RPC 端点与关注代币</div></div>
+          <svg class="collapse-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="collapse-body">
+          <div class="setting-row">
+            <div><div class="setting-label">以太坊主网 RPC</div><div class="setting-hint">https://eth.llamarpc.com</div></div>
+            <button class="btn">编辑</button>
+          </div>
+          <div class="setting-row">
+            <div><div class="setting-label">Polygon RPC</div><div class="setting-hint">https://polygon-r.com</div></div>
+            <button class="btn">编辑</button>
+          </div>
+          <button class="add-btn" style="margin-top:12px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加自定义链</button>
+        </div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">最近操作 <span class="badge">最近 24h</span></div>
+      <div class="audit-list">
+        <div class="audit-item"><span class="audit-time">21:30</span><span class="audit-kind">sign.decision</span><span class="audit-detail">转账 0.001 ETH → 0x7099...c79C8</span><span class="audit-effect allow">allow</span></div>
+        <div class="audit-item"><span class="audit-time">21:28</span><span class="audit-kind">sign.decision</span><span class="audit-detail">签名消息 "hello world"</span><span class="audit-effect ask">ask</span></div>
+        <div class="audit-item"><span class="audit-time">21:15</span><span class="audit-kind">account.created</span><span class="audit-detail">新账户 Testnet 0x3C44...7718</span><span class="audit-effect allow">info</span></div>
+        <div class="audit-item"><span class="audit-time">20:42</span><span class="audit-kind">sign.decision</span><span class="audit-detail">转账 0.1 ETH 被策略拒绝（超限额）</span><span class="audit-effect deny">deny</span></div>
+        <div class="audit-item"><span class="audit-time">20:30</span><span class="audit-kind">vault.unlocked</span><span class="audit-detail">金库解锁，来源：credentials</span><span class="audit-effect allow">info</span></div>
+      </div>
+      <button class="btn" style="margin-top:10px; width:100%; justify-content:center">查看完整审计日志</button>
+    </div>
+  </div>
+</div>
+<div class="design-note">DSH 钱包设置模块 · 设计稿 v1</div>
+</body>
+</html>

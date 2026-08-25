@@ -39,11 +39,21 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 
-		// ── data fetching (read-only same-origin endpoints) ───────────────
-		async function fetchJson(path) {
-			const res = await fetch(path, { headers: { accept: "application/json" } });
-			if (!res.ok) throw new Error(path + " -> HTTP " + String(res.status));
-			return await res.json();
+		// ── data fetching (host `web3` Remote namespace over Connection RPC) ──
+		let connectionSvc = null;
+
+		async function callHost(method, request) {
+			if (connectionSvc === null) throw new Error("连接服务尚未就绪");
+			const envelope = await connectionSvc.rpc.call("/api", "web3/" + method, {
+				args: { request: request === undefined ? null : request },
+			});
+			if (envelope !== null && typeof envelope === "object" && envelope.ok === false) {
+				throw new Error((envelope.error && envelope.error.message) || "调用失败");
+			}
+			if (envelope !== null && typeof envelope === "object" && envelope.ok === true) {
+				return envelope.value;
+			}
+			return envelope;
 		}
 
 		function useWalletData() {
@@ -51,12 +61,12 @@ window.__ModuleLoader__.load({
 			const load = React.useCallback(async () => {
 				try {
 					const [status, accounts, policy, audit] = await Promise.all([
-						fetchJson("/api/dsh-web3/status"),
-						fetchJson("/api/dsh-web3/accounts"),
-						fetchJson("/api/dsh-web3/policy"),
-						fetchJson("/api/dsh-web3/audit"),
+						callHost("status"),
+						callHost("accounts"),
+						callHost("policy"),
+						callHost("audit"),
 					]);
-					setState({ loading: false, error: null, status, accounts: accounts.accounts || [], policy: policy.policy || null, audit: audit.entries || [] });
+					setState({ loading: false, error: null, status: status || null, accounts: (accounts && accounts.accounts) || [], policy: (policy && policy.policy) || null, audit: (audit && audit.entries) || [] });
 				} catch (error) {
 					setState({ loading: false, error: error instanceof Error ? error.message : String(error), status: null, accounts: [], policy: null, audit: [] });
 				}
@@ -178,16 +188,17 @@ window.__ModuleLoader__.load({
 		}
 
 		// ── plugin wiring ─────────────────────────────────────────────────
-		const inject = ["slots"];
+		const inject = ["connection", "slots"];
 
-		function apply(ctx) {
-			const slots = ctx.get ? ctx.get("slots") : ctx.slots;
+		function apply(c) {
+			connectionSvc = c.get ? c.get("connection") : undefined;
+			const slots = c.get ? c.get("slots") : c.slots;
 			if (slots === undefined) return;
 			slots.inject("settings.section", () => slots.register({
 				name: "settings.section",
-				id: "dsh-web3",
+				id: "web3",
 				order: 250,
-				label: "Wallet",
+				label: "Web3",
 			}, WalletPanel));
 		}
 

@@ -123,12 +123,31 @@ When `disableHttp` is false, read-only endpoints are mounted for the web UI:
 
 All endpoints return secret-free JSON.
 
+## DSH web profile
+
+Add `dsh-web3` to the profile `package.json` and bundle list, then reinstall:
+
+```jsonc
+// ~/.dsh/profiles/web/package.json
+{
+  "dependencies": { "dsh-web3": "^0.1.3" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-freeroute", "dsh-web3"] } }
+}
+```
+
+The package's `cordis.patch.yml` (declared via `dsh.bundle.patch` in
+package.json) mounts the plugin as `web3` in the composed profile. On the
+DSH web host the plugin also registers a Typert Remote namespace
+(`web3/status`, `web3/accounts`, `web3/balances`, `web3/policy`,
+`web3/audit`, `web3/chains`) so the built-in settings page can read data
+over the client Connection RPC carrier.
+
 ## Web UI client
 
 The package ships a client half (`dsh-web3/client` in DSH web
-module-loader format) that renders a read-only **Wallet** settings panel —
-vault status, accounts, signing policy and recent audit — fed by the HTTP
-endpoints above.
+module-loader format) that renders a read-only **Web3** settings panel —
+vault status, accounts, signing policy and recent audit — fed by the
+`web3` Typert Remote namespace over the Connection RPC carrier.
 
 ## License
 

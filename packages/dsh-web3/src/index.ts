@@ -2,7 +2,9 @@
  * dsh-web3 plugin entrypoint.
  *
  * Mounts the wallet service (`ctx.wallet`), registers model tools
- * (`wallet_*`), and exposes read-only HTTP endpoints for the web UI.
+ * (`wallet_*`), and exposes read-only endpoints for the web UI — raw HTTP
+ * routes where an `http` service exists, plus a Typert Remote namespace
+ * (`web3/status`, `web3/accounts`, …) for the DSH web settings panel.
  *
  * @module dsh-web3
  */
@@ -13,11 +15,13 @@ import { PluginConfig, type PluginConfigValue } from './config.js';
 import { defaultVaultPath, WalletService, type ApprovalGateway } from './service.js';
 import { buildTools } from './tools.js';
 import { buildRoutes } from './http.js';
+import { Web3Remote } from './remote.js';
 
 export type { WalletService, ApprovalGateway, SendResult, SignMessageResult } from './service.js';
 export type { PluginConfigValue } from './config.js';
 export { buildTools } from './tools.js';
 export { buildRoutes } from './http.js';
+export { Web3Remote } from './remote.js';
 
 /** The resolved runtime config after defaults are applied. */
 interface ResolvedConfig {
@@ -123,7 +127,7 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
     }
   }
 
-  // Register read-only HTTP endpoints.
+  // Register read-only HTTP endpoints (plain Node hosts that expose `http`).
   if (!config.disableHttp) {
     const http = ctx.get('http') as
       | {
@@ -142,6 +146,20 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
       });
     } else {
       logger.warn('http service not available; skipping HTTP endpoint registration');
+    }
+
+    // Register the Typert Remote namespace consumed by the DSH web settings
+    // panel over the client Connection RPC carrier (`/api`, endpoint
+    // `web3/<method>`). `Service` construction requires a real Cordis context
+    // (`ctx.reflect.provide`); hosts without it stay on HTTP-only mode.
+    const reflect = (ctx as unknown as { reflect?: { provide?: unknown } }).reflect;
+    if (typeof reflect?.provide === 'function') {
+      servicePromise.then((service) => {
+        new Web3Remote(ctx, service);
+        logger.info('wallet web3 Typert Remote namespace mounted (status/accounts/balances/policy/audit/chains)');
+      });
+    } else {
+      logger.warn('ctx.reflect not available; skipping Typert Remote registration');
     }
   }
 

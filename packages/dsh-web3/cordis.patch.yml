@@ -1,0 +1,4 @@
+# cordis.patch.yml — dsh profile overlay mounting dsh-web3.
+- insert:
+    - id: web3
+      name: dsh-web3

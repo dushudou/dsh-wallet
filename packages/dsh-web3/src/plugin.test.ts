@@ -16,6 +16,14 @@ const HARDHAT_ACCOUNT_0 = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 const RECIPIENT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 const PASSPHRASE = 'test-vault-passphrase';
 
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('timeout waiting for condition');
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+}
+
 let dir: string;
 let vault: WalletVault;
 let provider: MockChainProvider;
@@ -429,14 +437,6 @@ describe('plugin entrypoint (applyWalletPlugin)', () => {
     return ctx;
   }
 
-  async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
-    const start = Date.now();
-    while (!predicate()) {
-      if (Date.now() - start > timeoutMs) throw new Error('timeout waiting for condition');
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-    }
-  }
-
   it('mounts ctx.wallet, registers tools and routes, and locks the vault on unload', async () => {
     const ctx = createMockCtx();
     const unload = applyWalletPlugin(ctx as never, { vaultPath: dir });
@@ -507,5 +507,71 @@ describe('passphrase resolution', () => {
     const value = await passphraseFromFile(file);
     expect(value).toBe('file-pass');
     await expect(import('node:fs/promises').then((fs) => fs.stat(file))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('typert remote (DSH web integration)', () => {
+  it('mounts the web3 Remote namespace and serves secret-free read models', async () => {
+    const { Context } = await import('@deepseek-ai/cordis');
+    const { Web3Remote } = await import('../src/remote.js');
+    const ctx = new Context();
+
+    const registeredTools: Array<{ name: string }> = [];
+    ctx.provide('model.tools', {
+      register(tool: { name: string }) {
+        registeredTools.push(tool);
+        return () => {};
+      },
+    });
+    ctx.provide('credentials', { resolve: async () => undefined, set: async () => {} });
+    ctx.provide('approval', { request: async () => 'unavailable' as const });
+
+    process.env[WALLET_PASSPHRASE_REF] = PASSPHRASE;
+    try {
+    const unload = applyWalletPlugin(ctx as never, {
+      vaultPath: dir,
+      passphrase: { mode: 'manual' },
+    });
+    await waitFor(() => ctx.get('wallet') !== undefined);
+    await waitFor(() => ctx.get('web3') !== undefined);
+
+    const remote = ctx.get('web3') as Web3Remote;
+    expect(remote).toBeInstanceOf(Web3Remote);
+
+    // Import an account through the plugin's own service.
+    const walletService = ctx.get('wallet') as WalletService;
+    const secretFile = join(dir, 'secret-remote.txt');
+    await writeFile(secretFile, HARDHAT_MNEMONIC, { mode: 0o600 });
+    await walletService.importAccount({ source: 'mnemonic', secretFile, label: 'hardhat' });
+
+    const status = await remote.status(null);
+    expect(status).toMatchObject({ unlocked: expect.any(Boolean) });
+
+    const accounts = await remote.accounts(null);
+    expect((accounts as { accounts: unknown[] }).accounts).toHaveLength(1);
+
+    const policy = await remote.policy(null);
+    expect((policy as { policy: { defaultEffect: string } }).policy.defaultEffect).toBe('ask');
+
+    const audit = await remote.audit({ limit: 5 });
+    expect(Array.isArray((audit as { entries: unknown[] }).entries)).toBe(true);
+
+    const chains = await remote.chains(null);
+    expect(Array.isArray((chains as { chains: unknown[] }).chains)).toBe(true);
+
+    // Balances: business error shape for a missing account.
+    const badBalance = await remote.balances({ chainId: 1, address: '0x0000000000000000000000000000000000000000' });
+    expect((badBalance as { ok: boolean }).ok).toBe(false);
+
+    // Never leak key material over the Remote surface.
+    const serialized = JSON.stringify({ status, accounts, policy, audit });
+    expect(serialized).not.toContain(HARDHAT_MNEMONIC);
+    expect(serialized).not.toContain('ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80');
+
+    await unload();
+    expect(ctx.get('wallet')).toBeUndefined();
+    } finally {
+      delete process.env[WALLET_PASSPHRASE_REF];
+    }
   });
 });

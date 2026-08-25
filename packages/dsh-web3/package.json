@@ -1,13 +1,13 @@
 {
   "name": "dsh-web3",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek Harness (DSH) plugin: agent-safe EVM wallet with encrypted vault, signing policy, model tools, and web UI.",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dushudou/dsh-wallet.git",
-    "directory": "packages/dsh-plugin"
+    "directory": "packages/dsh-web3"
   },
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -45,6 +45,7 @@
   },
   "dependencies": {
     "@deepseek-ai/cosmokit": "^1.8.2",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "dsh-web3-core": "workspace:*",
     "ethers": "^6.13.0"
   },
@@ -53,7 +54,6 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

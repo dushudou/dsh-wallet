@@ -23,6 +23,9 @@ importers:
       '@deepseek-ai/cosmokit':
         specifier: ^1.8.2
         version: 1.8.2
+      '@deepseek-ai/schemastery':
+        specifier: ^3.18.1
+        version: 3.18.1
       dsh-web3-core:
         specifier: workspace:*
         version: link:../dsh-web3-core
@@ -33,9 +36,6 @@ importers:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
         version: 4.0.1
-      '@deepseek-ai/schemastery':
-        specifier: ^3.18.1
-        version: 3.18.1
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1

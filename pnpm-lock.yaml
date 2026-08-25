@@ -18,30 +18,14 @@ importers:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@22.20.1)
 
-  packages/core:
-    dependencies:
-      ethers:
-        specifier: ^6.13.0
-        version: 6.17.0
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.0
-        version: 22.20.1
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
-      vitest:
-        specifier: ^3.0.0
-        version: 3.2.7(@types/node@22.20.1)
-
-  packages/dsh-plugin:
+  packages/dsh-web3:
     dependencies:
       '@deepseek-ai/cosmokit':
         specifier: ^1.8.2
         version: 1.8.2
-      '@dsh-wallet/core':
+      dsh-web3-core:
         specifier: workspace:*
-        version: link:../core
+        version: link:../dsh-web3-core
       ethers:
         specifier: ^6.13.0
         version: 6.17.0
@@ -52,6 +36,22 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
         version: 3.18.1
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)
+
+  packages/dsh-web3-core:
+    dependencies:
+      ethers:
+        specifier: ^6.13.0
+        version: 6.17.0
+    devDependencies:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1

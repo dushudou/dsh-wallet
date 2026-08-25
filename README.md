@@ -1,4 +1,4 @@
-# dsh-wallet
+# dsh-web3
 
 Agent-safe EVM wallet for the DeepSeek Harness (DSH). Encrypted local key vault, declarative signing policy, model tools, and a web UI — designed so an AI agent can manage on-chain assets without ever holding raw private keys in plaintext or signing unauthorised transactions.
 
@@ -6,8 +6,8 @@ Agent-safe EVM wallet for the DeepSeek Harness (DSH). Encrypted local key vault,
 
 ```
 packages/
-├── core/        # @dsh-wallet/core — library: vault, signing, policy, providers
-└── dsh-plugin/  # @dsh-wallet/plugin — DSH plugin: service, model tools, HTTP
+├── dsh-web3-core/        # dsh-web3-core — library: vault, signing, policy, providers
+└── dsh-web3/  # dsh-web3 — DSH plugin: service, model tools, HTTP
 ```
 
 ### Security model
@@ -19,12 +19,12 @@ packages/
 
 ## Packages
 
-### `@dsh-wallet/core`
+### `dsh-web3-core`
 
 The library surface. Use it directly when embedding the wallet into another application.
 
 ```ts
-import { WalletVault, policyPreset } from '@dsh-wallet/core';
+import { WalletVault, policyPreset } from 'dsh-web3-core';
 
 const vault = await WalletVault.open({ directory: './vault' });
 await vault.unlock('your-passphrase');
@@ -34,14 +34,14 @@ console.log(meta.address);
 
 Key exports: `WalletVault`, `populateTransaction`, `signTransaction`, `signMessage`, `signTypedData`, `evaluatePolicy`, `policyPreset`, `JsonRpcChainProvider`, `SpendTracker`, `AuditLog`.
 
-### `@dsh-wallet/plugin`
+### `dsh-web3`
 
 The DSH plugin. Mounts `ctx.wallet` (the programmatic service) and registers model tools (`wallet_*`) plus read-only HTTP endpoints for the web UI.
 
 ```yaml
 # dsh config
 - id: wallet
-  name: '@dsh-wallet/plugin'
+  name: 'dsh-web3'
   config:
     vaultPath: ~/.dsh/wallet
     autoLockMs: 900000
@@ -70,10 +70,10 @@ Requires Node >= 20.
 - [x] Core: 68 unit tests
 - [x] Plugin: wallet service, config schema, passphrase resolution, secret-file intake
 - [x] Plugin: model tools registration (18 `wallet_*` tools)
-- [x] Plugin: read-only HTTP endpoints (`/api/dsh-wallet/*`)
+- [x] Plugin: read-only HTTP endpoints (`/api/dsh-web3/*`)
 - [x] Plugin: web UI client (settings panel, DSH module-loader format)
 - [x] Integration tests (plugin entrypoint mount / tools / routes / unload)
-- [x] Published to npm: `@dsh-wallet/core`, `@dsh-wallet/plugin`
+- [x] Published to npm: `dsh-web3-core`, `dsh-web3`
 
 ## License
 

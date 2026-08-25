@@ -351,6 +351,19 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
         return service.exportKeystore(meta.id, args.keystorePassphrase as string);
       },
     },
+
+    {
+      name: 'wallet_audit_log',
+      description: 'Recent security audit entries: signing decisions, approvals, policy changes. Secret-free by construction.',
+      parameters: z.object({
+        limit: z.natural().required(false).description('Maximum entries to return. Default 30.'),
+      }),
+      async execute(args) {
+        const limit = typeof args.limit === 'number' ? args.limit : 30;
+        return { entries: await service.recentAudit(limit) };
+      },
+      output: { render: (_args, value) => jsonBlock(value) },
+    },
   ];
 
   return tools;

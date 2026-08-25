@@ -69,10 +69,11 @@ Requires Node >= 20.
 - [x] Core: vault, crypto, accounts, signing (EIP-1559 / 191 / 712), policy engine, spend tracking, audit, redaction, chain registry, providers
 - [x] Core: 68 unit tests
 - [x] Plugin: wallet service, config schema, passphrase resolution, secret-file intake
-- [ ] Plugin: model tools registration (`wallet_*`)
-- [ ] Plugin: read-only HTTP endpoints
-- [ ] Plugin: web UI client
-- [ ] Integration / e2e tests
+- [x] Plugin: model tools registration (18 `wallet_*` tools)
+- [x] Plugin: read-only HTTP endpoints (`/api/dsh-wallet/*`)
+- [x] Plugin: web UI client (settings panel, DSH module-loader format)
+- [x] Integration tests (plugin entrypoint mount / tools / routes / unload)
+- [x] Published to npm: `@dsh-wallet/core`, `@dsh-wallet/plugin`
 
 ## License
 

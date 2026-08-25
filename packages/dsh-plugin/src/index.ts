@@ -166,9 +166,10 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
 }
 
 // Attach plugin metadata as static properties (cordis plugin shape).
-(applyWalletPlugin as unknown as { name: string; Config: typeof PluginConfig; provide: string }).name = '@dsh-wallet/plugin';
-(applyWalletPlugin as unknown as { name: string; Config: typeof PluginConfig; provide: string }).Config = PluginConfig;
-(applyWalletPlugin as unknown as { name: string; Config: typeof PluginConfig; provide: string }).provide = 'wallet';
+// Function `name` is read-only: define it instead of assigning.
+Object.defineProperty(applyWalletPlugin, 'name', { value: '@dsh-wallet/plugin' });
+(applyWalletPlugin as unknown as { Config: typeof PluginConfig }).Config = PluginConfig;
+(applyWalletPlugin as unknown as { provide: string }).provide = 'wallet';
 
 export default applyWalletPlugin;
 

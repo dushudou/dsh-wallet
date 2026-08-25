@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Transaction, getAddress } from 'ethers';
 import { WalletVault, policyPreset } from '@dsh-wallet/core';
+import { applyWalletPlugin } from '../src/index.js';
 import { WalletService } from '../src/service.js';
 import { buildTools } from '../src/tools.js';
 import { buildRoutes } from '../src/http.js';
@@ -232,6 +233,7 @@ describe('model tools', () => {
       'wallet_policy_set',
       'wallet_reveal_secret',
       'wallet_export_keystore',
+      'wallet_audit_log',
     ]) {
       expect(names).toContain(expected);
     }
@@ -372,6 +374,97 @@ describe('http endpoints', () => {
       expect(serialized).not.toContain(HARDHAT_MNEMONIC);
       expect(serialized).not.toContain('ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80');
     }
+  });
+});
+
+describe('plugin entrypoint (applyWalletPlugin)', () => {
+  function createMockCtx() {
+    const services = new Map<string, unknown>();
+    const registeredTools: Array<{ name: string }> = [];
+    const registeredRoutes: Array<{ path: string }> = [];
+    const disposed: string[] = [];
+    const ctx = {
+      get(key: string) {
+        return services.get(key);
+      },
+      provide(key: string, value: unknown) {
+        services.set(key, value);
+        return () => {
+          services.delete(key);
+          disposed.push(`provide:${key}`);
+        };
+      },
+      logger() {
+        return { info() {}, warn() {}, error() {}, debug() {} };
+      },
+      // mirrors for assertions
+      services,
+      registeredTools,
+      registeredRoutes,
+      disposed,
+    };
+    services.set('model.tools', {
+      register(tool: { name: string }) {
+        registeredTools.push(tool);
+        return () => {
+          disposed.push(`tool:${tool.name}`);
+        };
+      },
+    });
+    services.set('http', {
+      get(path: string) {
+        registeredRoutes.push({ path });
+        return () => {
+          disposed.push(`route:${path}`);
+        };
+      },
+    });
+    services.set('credentials', {
+      resolve: async () => undefined,
+      set: async () => undefined,
+    });
+    services.set('approval', {
+      request: async () => 'unavailable' as const,
+    });
+    return ctx;
+  }
+
+  async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error('timeout waiting for condition');
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+  }
+
+  it('mounts ctx.wallet, registers tools and routes, and locks the vault on unload', async () => {
+    const ctx = createMockCtx();
+    const unload = applyWalletPlugin(ctx as never, { vaultPath: dir });
+
+    await waitFor(() => ctx.get('wallet') !== undefined);
+    const service = ctx.get('wallet') as WalletService;
+    expect(service).toBeInstanceOf(WalletService);
+    expect(service.status().unlocked).toBe(false); // fresh vault starts locked
+
+    expect(ctx.registeredTools.some((tool) => tool.name === 'wallet_status')).toBe(true);
+    expect(ctx.registeredTools.some((tool) => tool.name === 'wallet_send_transaction')).toBe(true);
+    expect(ctx.registeredTools.some((tool) => tool.name === 'wallet_audit_log')).toBe(true);
+    expect(ctx.registeredRoutes.some((route) => route.path === '/api/dsh-wallet/status')).toBe(true);
+    expect(ctx.registeredRoutes.some((route) => route.path === '/api/dsh-wallet/accounts')).toBe(true);
+
+    await unload();
+    expect(ctx.get('wallet')).toBeUndefined();
+    expect(service.status().unlocked).toBe(false); // vault locked on unload
+    expect(ctx.disposed).toContain('provide:wallet');
+  });
+
+  it('skips tools and http when disabled in config', async () => {
+    const ctx = createMockCtx();
+    const unload = applyWalletPlugin(ctx as never, { vaultPath: dir, disableTools: true, disableHttp: true });
+    await waitFor(() => ctx.get('wallet') !== undefined);
+    expect(ctx.registeredTools).toHaveLength(0);
+    expect(ctx.registeredRoutes).toHaveLength(0);
+    await unload();
   });
 });
 

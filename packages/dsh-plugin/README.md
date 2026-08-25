@@ -91,32 +91,44 @@ When `disableTools` is false, the plugin registers these tools:
 
 | Tool | Description |
 |---|---|
-| `wallet_status` | Vault status, account count, policy summary |
-| `wallet_unlock` | Unlock the vault (passphrase from resolution chain or file) |
-| `wallet_lock` | Lock the vault |
-| `wallet_list_accounts` | List account metadata |
-| `wallet_create_account` | Generate a new HD account |
-| `wallet_import_account` | Import from mnemonic / private key / keystore file |
-| `wallet_balances` | Native + token balances on a chain |
+| `wallet_status` | Vault status, account count, policy summary, auto-lock |
+| `wallet_unlock` | Unlock the vault (passphrase from resolution chain or `passphraseFile`) |
+| `wallet_lock` | Lock the vault, zeroizing decrypted keys |
+| `wallet_list` | List account metadata (no secrets) |
+| `wallet_create` | Generate a new HD account; reveal mnemonic requires approval |
+| `wallet_import` | Import from a 0600 mnemonic / private key / keystore file |
+| `wallet_remove_account` | Remove an account from the vault |
+| `wallet_chains` | List the built-in EVM chain registry |
+| `wallet_balance` | Native + configured token balances on a chain |
 | `wallet_prepare_transaction` | Dry-run: populate + policy evaluation, no signing |
 | `wallet_send_transaction` | Full flow: policy → approval → sign → broadcast |
 | `wallet_sign_message` | Sign an EIP-191 message under policy |
 | `wallet_sign_typed_data` | Sign EIP-712 typed data under policy |
-| `wallet_get_policy` | Current signing policy |
-| `wallet_set_policy` | Replace the signing policy |
-| `wallet_audit_log` | Recent audit entries |
+| `wallet_policy_get` | Current signing policy |
+| `wallet_policy_set` | Replace the signing policy (preset or full document; requires approval) |
+| `wallet_reveal_secret` | Reveal mnemonic / private key (ALWAYS requires approval) |
+| `wallet_export_keystore` | Export an account as Web3 Secret Storage JSON |
+| `wallet_audit_log` | Recent secret-free audit entries |
 
 ## HTTP endpoints
 
 When `disableHttp` is false, read-only endpoints are mounted for the web UI:
 
-- `GET /wallet/status` — vault status
-- `GET /wallet/accounts` — account list
-- `GET /wallet/balances?chainId=1&address=0x...` — balances
-- `GET /wallet/policy` — current policy
-- `GET /wallet/audit?limit=50` — recent audit entries
+- `GET /api/dsh-wallet/status` — vault status
+- `GET /api/dsh-wallet/accounts` — account list
+- `GET /api/dsh-wallet/balances?chainId=1&address=0x...` — balances
+- `GET /api/dsh-wallet/policy` — current policy
+- `GET /api/dsh-wallet/audit?limit=50` — recent audit entries
+- `GET /api/dsh-wallet/chains` — built-in chain registry
 
 All endpoints return secret-free JSON.
+
+## Web UI client
+
+The package ships a client half (`@dsh-wallet/plugin/client` in DSH web
+module-loader format) that renders a read-only **Wallet** settings panel —
+vault status, accounts, signing policy and recent audit — fed by the HTTP
+endpoints above.
 
 ## License
 

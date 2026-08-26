@@ -575,8 +575,92 @@ describe('typert remote (DSH web integration)', () => {
     }
   });
 
+  it('web3/create and web3/import manage wallets through the remote', async () => {
+    const { Context } = await import('@deepseek-ai/cordis');
+    const ctx = new Context();
+    type ApprovalOutcome = 'allowed-once' | 'rejected' | 'throw';
+    let approvalOutcome: ApprovalOutcome = 'allowed-once';
+    ctx.provide('model.tools', { register() { return () => {}; } });
+    ctx.provide('credentials', { resolve: async () => undefined, set: async () => {} });
+    ctx.provide('approval', {
+      request: async () => {
+        if (approvalOutcome === 'throw') throw new Error('no session');
+        return approvalOutcome;
+      },
+    });
+
+    process.env[WALLET_PASSPHRASE_REF] = PASSPHRASE;
+    try {
+      const unload = applyWalletPlugin(ctx as never, {
+        vaultPath: dir,
+        passphrase: { mode: 'manual' },
+      });
+      await waitFor(() => ctx.get('web3') !== undefined);
+      const remote = ctx.get('web3') as Web3Remote;
+
+      // create without reveal: account created, mnemonic hidden
+      const created = await remote.create({ label: 'ui-created' });
+      expect((created as { ok?: boolean }).ok).not.toBe(false);
+      const createValue = created as { meta: { address: string }; mnemonicRevealed: boolean };
+      expect(createValue.meta.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(createValue.mnemonicRevealed).toBe(false);
+      expect('mnemonic' in created).toBe(false);
+
+      // create with reveal + approval allowed: mnemonic present
+      approvalOutcome = 'allowed-once';
+      const revealed = (await remote.create({ label: 'revealed', reveal: true })) as unknown as {
+        meta: { address: string };
+        mnemonic?: string;
+        mnemonicRevealed: boolean;
+      };
+      expect(revealed.mnemonicRevealed).toBe(true);
+      expect((revealed.mnemonic ?? '').split(' ')).toHaveLength(12);
+
+      // create with reveal + approval rejected: mnemonic withheld
+      approvalOutcome = 'rejected';
+      const denied = (await remote.create({ label: 'denied', reveal: true })) as unknown as {
+        mnemonic?: string;
+        mnemonicRevealed: boolean;
+      };
+      expect(denied.mnemonicRevealed).toBe(false);
+      expect(denied.mnemonic).toBeUndefined();
+
+      // import from mnemonic
+      approvalOutcome = 'allowed-once';
+      const imported = (await remote.import({
+        source: 'mnemonic',
+        secret: HARDHAT_MNEMONIC,
+        label: 'ui-imported',
+        index: 0,
+      })) as { ok?: boolean; meta?: { address: string } };
+      expect(imported.ok).not.toBe(false);
+      expect(imported.meta?.address).toBe(HARDHAT_ACCOUNT_0);
+
+      // approval throwing (e.g. headless, no session) fails safe: no reveal
+      approvalOutcome = 'throw';
+      const safe = (await remote.create({ label: 'safe', reveal: true })) as unknown as {
+        mnemonic?: string;
+        mnemonicRevealed: boolean;
+      };
+      expect(safe.mnemonicRevealed).toBe(false);
+      expect(safe.mnemonic).toBeUndefined();
+
+      // bad source -> business error shape
+      const bad = (await remote.import({ source: 'nonsense' as never })) as { ok: boolean; error: string };
+      expect(bad.ok).toBe(false);
+
+      // accounts count via remote reflects UI operations
+      const accounts = (await remote.accounts(null)) as { accounts: unknown[] };
+      expect(accounts.accounts.length).toBeGreaterThanOrEqual(2);
+
+      await unload();
+    } finally {
+      delete process.env[WALLET_PASSPHRASE_REF];
+    }
+  });
+
   it('exposes all methods with a single "request" parameter (gateway wire contract)', () => {
-    const methods = ['status', 'accounts', 'balances', 'policy', 'audit', 'chains'] as const;
+    const methods = ['status', 'accounts', 'balances', 'policy', 'audit', 'chains', 'create', 'import'] as const;
     for (const method of methods) {
       const fn = (Web3Remote.prototype as never as Record<string, () => never>)[method];
       const source = Function.prototype.toString.call(fn);

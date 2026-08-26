@@ -155,8 +155,8 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
     const reflect = (ctx as unknown as { reflect?: { provide?: unknown } }).reflect;
     if (typeof reflect?.provide === 'function') {
       servicePromise.then((service) => {
-        new Web3Remote(ctx, service);
-        logger.info('wallet web3 Typert Remote namespace mounted (status/accounts/balances/policy/audit/chains)');
+        new Web3Remote(ctx, service, resolveApproval(ctx));
+        logger.info('wallet web3 Typert Remote namespace mounted (status/accounts/balances/policy/audit/chains/create/import)');
       });
     } else {
       logger.warn('ctx.reflect not available; skipping Typert Remote registration');

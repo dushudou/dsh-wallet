@@ -80,10 +80,9 @@ export interface WalletServiceOptions {
   createProvider?: (chainId: number, rpcUrl?: string) => ChainProvider;
 }
 
-/** Default vault location: `$DSH_HOME/wallet` or `~/.dsh/wallet`. */
+/** Default vault location: `~/.dsh-web3` (plugin-owned home dot-dir). */
 export function defaultVaultPath(): string {
-  const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh');
-  return resolve(join(dshHome, 'wallet'));
+  return resolve(join(homedir(), '.dsh-web3'));
 }
 
 /** The wallet service mounted as `ctx.wallet`. */

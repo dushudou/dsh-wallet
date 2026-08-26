@@ -7,6 +7,18 @@ window.__ModuleLoader__.load({
 		const React = require("react");
 		const h = React.createElement;
 
+		// DSH native primitives (fall back to minimal local styles if a bundle
+		// lacks the module, so the panel never breaks on old hosts).
+		let Button = null;
+		let Input = null;
+		try {
+			const primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+			if (primitives && typeof primitives.Button === "function") Button = primitives.Button;
+			if (primitives && typeof primitives.Input === "function") Input = primitives.Input;
+		} catch (e) {
+			// primitives unavailable: keep local fallbacks
+		}
+
 		// ── styles (DSH theme tokens: light/dark follow the host) ─────────
 		const CSS = `
 .dshw-root{display:flex;flex-direction:column;gap:16px;padding:4px 2px;font-size:13px;color:var(--dsw-alias-label-primary,#e8e8ea)}
@@ -23,14 +35,13 @@ window.__ModuleLoader__.load({
 .dshw-badge-deny,.dshw-badge-locked{background:var(--dsw-alias-state-error-secondary,rgba(248,81,73,.16));color:var(--dsw-alias-state-error-primary,#f85149)}
 .dshw-badge-ask{background:var(--dsw-alias-state-warn-secondary,rgba(210,153,34,.16));color:var(--dsw-alias-state-warn-primary,#d29922)}
 .dshw-badge-source{background:var(--dsw-alias-state-business-tertiary,rgba(74,158,255,.14));color:var(--dsw-alias-state-business-primary,#4a9eff)}
-.dshw-btn{border:1px solid var(--dsw-alias-border-l2,#3a3b42);background:var(--dsw-alias-interactive-bg-hover,#26272c);color:var(--dsw-alias-label-primary,#e8e8ea);border-radius:8px;padding:6px 14px;font-size:12px;font-weight:500;cursor:pointer}
+/* Local fallback buttons: only used when the DSH primitives module is absent. */
+.dshw-btn{border:1px solid var(--dsw-alias-border-l2,#3a3b42);background:var(--dsw-alias-interactive-bg-hover,#26272c);color:var(--dsw-alias-label-primary,#e8e8ea);border-radius:7px;padding:4px 10px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;line-height:20px;display:inline-flex;align-items:center;gap:6px}
 .dshw-btn:hover{border-color:var(--dsw-alias-state-business-primary,#4a9eff)}
 .dshw-btn:disabled{opacity:.55;cursor:default}
-.dshw-btnPrimary{border:1px solid transparent;background:var(--dsw-alias-button-primary-fill,#2f6fed);color:var(--dsw-alias-label-primary-foreground,#fff);border-radius:10px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer}
+.dshw-btnPrimary{border:1px solid transparent;background:var(--dsw-alias-button-primary-fill,#2f6fed);color:var(--dsw-alias-label-primary-foreground,#fff);border-radius:7px;padding:4px 10px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;line-height:20px;display:inline-flex;align-items:center;gap:6px}
 .dshw-btnPrimary:hover{background:var(--dsw-alias-button-primary-hover,#4a7bff)}
 .dshw-btnPrimary:disabled{opacity:.55;cursor:default}
-.dshw-btnGhost{background:transparent;border-color:var(--dsw-alias-border-l2,#3a3b42);color:var(--dsw-alias-label-secondary,#b0b2b8)}
-.dshw-btnWide{width:100%;justify-content:center}
 .dshw-input,.dshw-textarea{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2,#3a3b42);background:var(--dsw-alias-bg-layer-1,#1e1f24);color:var(--dsw-alias-label-primary,#e8e8ea);border-radius:8px;padding:8px 10px;font-size:12px;font-family:inherit}
 .dshw-input:focus,.dshw-textarea:focus{outline:none;border-color:var(--dsw-alias-state-business-primary,#4a9eff)}
 .dshw-textarea{min-height:72px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -41,15 +52,16 @@ window.__ModuleLoader__.load({
 .dshw-note{color:var(--dsw-alias-state-warn-primary,#d29922);font-size:12px;padding:4px 0}
 .dshw-auditKind{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--dsw-alias-label-secondary,#b0b2b8)}
 .dshw-auditTime{font-size:11px;color:var(--dsw-alias-label-dimmed,#6a6c73);min-width:120px}
-.dshw-tabs{display:flex;gap:4px;background:var(--dsw-alias-bg-layer-1,#1e1f24);border:1px solid var(--dsw-alias-border-l1,#2c2d33);border-radius:10px;padding:3px;margin-bottom:12px}
-.dshw-tab{flex:1;border:none;background:transparent;color:var(--dsw-alias-label-secondary,#b0b2b8);border-radius:7px;padding:6px 8px;font-size:12px;font-weight:500;cursor:pointer}
+.dshw-tabs{display:flex;gap:4px;background:var(--dsw-alias-bg-layer-1,#1e1f24);border:1px solid var(--dsw-alias-border-l1,#2c2d33);border-radius:8px;padding:3px;margin-bottom:12px}
+.dshw-tab{flex:1;border:none;background:transparent;color:var(--dsw-alias-label-secondary,#b0b2b8);border-radius:6px;padding:4px 8px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit}
 .dshw-tab:hover{color:var(--dsw-alias-label-primary,#e8e8ea)}
 .dshw-tabActive{background:var(--dsw-alias-bg-base,#17181c);color:var(--dsw-alias-label-primary,#e8e8ea)}
-.dshw-hero{display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;padding:28px 12px}
-.dshw-logo{width:56px;height:56px;border-radius:18px;background:var(--dsw-alias-button-primary-fill,#2f6fed);color:var(--dsw-alias-label-primary-foreground,#fff);display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:800}
-.dshw-heroTitle{font-size:16px;font-weight:600;margin:0;color:var(--dsw-alias-label-primary,#e8e8ea)}
-.dshw-heroSub{font-size:12px;color:var(--dsw-alias-label-secondary,#b0b2b8);margin:0;max-width:300px;line-height:1.5}
-.dshw-heroActions{display:flex;flex-direction:column;gap:8px;width:240px;margin-top:4px}
+.dshw-hero{display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:6px 0 10px}
+.dshw-heroTitleRow{display:flex;align-items:center;gap:8px}
+.dshw-logo{width:28px;height:28px;border-radius:9px;background:var(--dsw-alias-button-primary-fill,#2f6fed);color:var(--dsw-alias-label-primary-foreground,#fff);display:inline-flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex:none}
+.dshw-heroTitle{font-size:14px;font-weight:600;margin:0;color:var(--dsw-alias-label-primary,#e8e8ea)}
+.dshw-heroSub{font-size:12px;color:var(--dsw-alias-label-secondary,#b0b2b8);margin:0;max-width:360px;line-height:1.5}
+.dshw-heroActions{display:flex;align-items:center;gap:8px;margin-top:2px}
 .dshw-wordGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
 .dshw-wordCell{display:flex;align-items:center;gap:6px;background:var(--dsw-alias-bg-layer-1,#1e1f24);border:1px solid var(--dsw-alias-border-l1,#2c2d33);border-radius:8px;padding:8px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--dsw-alias-label-primary,#e8e8ea)}
 .dshw-wordIndex{color:var(--dsw-alias-label-dimmed,#6a6c73);font-size:11px;min-width:18px}
@@ -67,6 +79,48 @@ window.__ModuleLoader__.load({
 			tag.dataset.pluginCss = STYLE_ID;
 			tag.textContent = CSS;
 			document.head.appendChild(tag);
+		}
+
+		// ── DSH-consistent control helpers ────────────────────────────────
+		// Use the host primitives whenever present; identical layout either way.
+		function SysButton(props) {
+			if (Button !== null) {
+				return h(Button, {
+					variant: props.variant || "ghost",
+					size: props.size || "sm",
+					disabled: props.disabled,
+					onClick: props.onClick,
+					type: props.type,
+					title: props.title,
+					className: props.className,
+				}, props.children);
+			}
+			const cls = props.variant === "primary" ? "dshw-btnPrimary" : "dshw-btn";
+			return h("button", {
+				className: cls + (props.className ? " " + props.className : ""),
+				disabled: props.disabled,
+				onClick: props.onClick,
+				title: props.title,
+			}, props.children);
+		}
+
+		function SysInput(props) {
+			if (Input !== null) {
+				return h(Input, {
+					value: props.value,
+					placeholder: props.placeholder,
+					type: props.type,
+					onChange: props.onChange,
+					className: props.className,
+				});
+			}
+			return h("input", {
+				className: "dshw-input" + (props.className ? " " + props.className : ""),
+				value: props.value,
+				placeholder: props.placeholder,
+				type: props.type,
+				onChange: props.onChange,
+			});
 		}
 
 		// ── locale dictionaries (DSH host language switch) ─────────────────
@@ -320,8 +374,8 @@ window.__ModuleLoader__.load({
 				h("div", { className: "dshw-head" },
 					h("h3", { className: "dshw-cardTitle" }, T("accounts")),
 					h("div", { style: { display: "flex", gap: "6px" } },
-						h("button", { className: "dshw-btn dshw-btnGhost", onClick: props.onCreate }, "+ " + T("create")),
-						h("button", { className: "dshw-btn dshw-btnGhost", onClick: props.onImport }, "+ " + T("import")),
+						h(SysButton, { variant: "ghost", onClick: props.onCreate }, "+ " + T("create")),
+						h(SysButton, { variant: "ghost", onClick: props.onImport }, "+ " + T("import")),
 					),
 				),
 				accounts.length === 0
@@ -383,13 +437,13 @@ window.__ModuleLoader__.load({
 			return parts.join(" ");
 		}
 
-		// ── Metamask-style flows ─────────────────────────────────────────
+		// ── Metamask-style flows (DSH-consistent compact controls) ────────
 		function FlowShell(props) {
 			const T = props.t;
 			return h("div", { className: "dshw-root" },
 				h("div", { className: "dshw-head" },
 					h("div", { className: "dshw-mono" }, "dsh-web3"),
-					h("button", { className: "dshw-btn dshw-btnGhost", onClick: props.onBack }, "← " + T("back")),
+					h(SysButton, { variant: "ghost", onClick: props.onBack }, "← " + T("back")),
 				),
 				props.children,
 			);
@@ -404,7 +458,7 @@ window.__ModuleLoader__.load({
 					setTimeout(() => setCopied(false), 1400);
 				}).catch(() => {});
 			};
-			return h("button", { className: "dshw-btn dshw-btnGhost", onClick: onClick }, copied ? T("copied") : T("copy"));
+			return h(SysButton, { variant: "ghost", onClick: onClick }, copied ? T("copied") : T("copy"));
 		}
 
 		function CreateWalletFlow(props) {
@@ -468,7 +522,7 @@ window.__ModuleLoader__.load({
 							T("backupCheckbox"),
 						),
 						h("div", { className: "dshw-actions" },
-							h("button", { className: "dshw-btnPrimary dshw-btnWide", disabled: !saved, onClick: finish }, T("done")),
+							h(SysButton, { variant: "primary", disabled: !saved, onClick: finish }, T("done")),
 						),
 					),
 				);
@@ -480,7 +534,7 @@ window.__ModuleLoader__.load({
 					h("p", { style: { margin: "0 0 14px", color: "var(--dsw-alias-label-secondary,#b0b2b8)" } }, T("createDesc")),
 					h("div", { className: "dshw-field" },
 						h("label", { className: "dshw-fieldLabel" }, T("accountLabel") + " " + T("optional")),
-						h("input", { className: "dshw-input", value: label, placeholder: T("accountLabelPlaceholder"), onChange: (e) => setLabel(e.target.value) }),
+						h(SysInput, { value: label, placeholder: T("accountLabelPlaceholder"), onChange: (e) => setLabel(e.target.value) }),
 					),
 					h("div", { className: "dshw-field" },
 						h("label", { className: "dshw-fieldLabel" }, T("words")),
@@ -490,7 +544,7 @@ window.__ModuleLoader__.load({
 					),
 					error ? h("div", { className: "dshw-error" }, error) : null,
 					h("div", { className: "dshw-actions" },
-						h("button", { className: "dshw-btnPrimary dshw-btnWide", disabled: busy, onClick: () => void run() }, busy ? "…" : T("createBtn")),
+						h(SysButton, { variant: "primary", disabled: busy, onClick: () => void run() }, busy ? "…" : T("createBtn")),
 					),
 					h("div", { className: "dshw-caption", style: { marginTop: "10px", textAlign: "center" } }, T("subtitle")),
 				),
@@ -554,7 +608,7 @@ window.__ModuleLoader__.load({
 					tab === "privateKey"
 						? h("div", { className: "dshw-field" },
 							h("label", { className: "dshw-fieldLabel" }, T("tabPrivateKey")),
-							h("input", { className: "dshw-input", value: secret, placeholder: T("privateKeyPlaceholder"), onChange: (e) => setSecret(e.target.value) }),
+							h(SysInput, { value: secret, placeholder: T("privateKeyPlaceholder"), onChange: (e) => setSecret(e.target.value) }),
 						)
 						: null,
 					tab === "keystore"
@@ -565,17 +619,17 @@ window.__ModuleLoader__.load({
 							),
 							h("div", { className: "dshw-field" },
 								h("label", { className: "dshw-fieldLabel" }, T("keystorePassphrase")),
-								h("input", { className: "dshw-input", type: "password", value: pass, placeholder: T("keystorePassPlaceholder"), onChange: (e) => setPass(e.target.value) }),
+								h(SysInput, { type: "password", value: pass, placeholder: T("keystorePassPlaceholder"), onChange: (e) => setPass(e.target.value) }),
 							),
 						)
 						: null,
 					h("div", { className: "dshw-field" },
 						h("label", { className: "dshw-fieldLabel" }, T("accountLabel") + " " + T("optional")),
-						h("input", { className: "dshw-input", value: label, placeholder: T("accountLabelPlaceholder"), onChange: (e) => setLabel(e.target.value) }),
+						h(SysInput, { value: label, placeholder: T("accountLabelPlaceholder"), onChange: (e) => setLabel(e.target.value) }),
 					),
 					error ? h("div", { className: "dshw-error" }, error) : null,
 					h("div", { className: "dshw-actions" },
-						h("button", { className: "dshw-btnPrimary dshw-btnWide", disabled: busy, onClick: () => void run() }, busy ? "…" : T("importBtn")),
+						h(SysButton, { variant: "primary", disabled: busy, onClick: () => void run() }, busy ? "…" : T("importBtn")),
 					),
 				),
 			);
@@ -586,12 +640,14 @@ window.__ModuleLoader__.load({
 			return h("div", { className: "dshw-root" },
 				h("div", { className: "dshw-card" },
 					h("div", { className: "dshw-hero" },
-						h("div", { className: "dshw-logo" }, "3"),
-						h("h2", { className: "dshw-heroTitle" }, "dsh-web3"),
+						h("div", { className: "dshw-heroTitleRow" },
+							h("span", { className: "dshw-logo" }, "3"),
+							h("h2", { className: "dshw-heroTitle" }, "dsh-web3"),
+						),
 						h("p", { className: "dshw-heroSub" }, T("subtitle")),
 						h("div", { className: "dshw-heroActions" },
-							h("button", { className: "dshw-btnPrimary dshw-btnWide", onClick: props.onCreate }, T("createWallet")),
-							h("button", { className: "dshw-btn dshw-btnWide", onClick: props.onImport }, T("importWallet")),
+							h(SysButton, { variant: "primary", onClick: props.onCreate }, T("createWallet")),
+							h(SysButton, { variant: "ghost", onClick: props.onImport }, T("importWallet")),
 						),
 					),
 				),
@@ -627,13 +683,13 @@ window.__ModuleLoader__.load({
 			if (state.loading) return h("div", { className: "dshw-root" }, h("div", { className: "dshw-empty" }, T("loading")));
 			if (state.error) return h("div", { className: "dshw-root" },
 				h("div", { className: "dshw-error" }, T("errorPrefix") + ": " + String(state.error) + " " + T("errorHint")),
-				h("button", { className: "dshw-btn", onClick: () => void reload() }, T("refresh")),
+				h(SysButton, { variant: "ghost", onClick: () => void reload() }, T("refresh")),
 			);
 
 			return h("div", { className: "dshw-root" },
 				h("div", { className: "dshw-head" },
 					h("div", { className: "dshw-mono" }, "dsh-web3"),
-					h("button", { className: "dshw-btn", onClick: () => void reload() }, T("refresh")),
+					h(SysButton, { variant: "ghost", onClick: () => void reload() }, T("refresh")),
 				),
 				h(Dashboard, { state: state, onCreate: showCreate, onImport: showImport, t: T }),
 			);

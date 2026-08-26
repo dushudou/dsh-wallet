@@ -578,16 +578,9 @@ describe('typert remote (DSH web integration)', () => {
   it('web3/create and web3/import manage wallets through the remote', async () => {
     const { Context } = await import('@deepseek-ai/cordis');
     const ctx = new Context();
-    type ApprovalOutcome = 'allowed-once' | 'rejected' | 'throw';
-    let approvalOutcome: ApprovalOutcome = 'allowed-once';
     ctx.provide('model.tools', { register() { return () => {}; } });
     ctx.provide('credentials', { resolve: async () => undefined, set: async () => {} });
-    ctx.provide('approval', {
-      request: async () => {
-        if (approvalOutcome === 'throw') throw new Error('no session');
-        return approvalOutcome;
-      },
-    });
+    ctx.provide('approval', { request: async () => 'rejected' });
 
     process.env[WALLET_PASSPHRASE_REF] = PASSPHRASE;
     try {
@@ -606,8 +599,7 @@ describe('typert remote (DSH web integration)', () => {
       expect(createValue.mnemonicRevealed).toBe(false);
       expect('mnemonic' in created).toBe(false);
 
-      // create with reveal + approval allowed: mnemonic present
-      approvalOutcome = 'allowed-once';
+      // create with reveal: panel-authorized direct reveal (Metamask model)
       const revealed = (await remote.create({ label: 'revealed', reveal: true })) as unknown as {
         meta: { address: string };
         mnemonic?: string;
@@ -616,17 +608,7 @@ describe('typert remote (DSH web integration)', () => {
       expect(revealed.mnemonicRevealed).toBe(true);
       expect((revealed.mnemonic ?? '').split(' ')).toHaveLength(12);
 
-      // create with reveal + approval rejected: mnemonic withheld
-      approvalOutcome = 'rejected';
-      const denied = (await remote.create({ label: 'denied', reveal: true })) as unknown as {
-        mnemonic?: string;
-        mnemonicRevealed: boolean;
-      };
-      expect(denied.mnemonicRevealed).toBe(false);
-      expect(denied.mnemonic).toBeUndefined();
-
       // import from mnemonic
-      approvalOutcome = 'allowed-once';
       const imported = (await remote.import({
         source: 'mnemonic',
         secret: HARDHAT_MNEMONIC,
@@ -635,15 +617,6 @@ describe('typert remote (DSH web integration)', () => {
       })) as { ok?: boolean; meta?: { address: string } };
       expect(imported.ok).not.toBe(false);
       expect(imported.meta?.address).toBe(HARDHAT_ACCOUNT_0);
-
-      // approval throwing (e.g. headless, no session) fails safe: no reveal
-      approvalOutcome = 'throw';
-      const safe = (await remote.create({ label: 'safe', reveal: true })) as unknown as {
-        mnemonic?: string;
-        mnemonicRevealed: boolean;
-      };
-      expect(safe.mnemonicRevealed).toBe(false);
-      expect(safe.mnemonic).toBeUndefined();
 
       // bad source -> business error shape
       const bad = (await remote.import({ source: 'nonsense' as never })) as { ok: boolean; error: string };

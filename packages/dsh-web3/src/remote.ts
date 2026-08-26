@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import type { Context } from '@deepseek-ai/cordis';
-import type { ApprovalGateway, WalletService } from './service.js';
+import type { WalletService } from './service.js';
 
 /**
  * Mark one `@Remote(method)` method without decorator syntax. The shim mimics
@@ -72,12 +72,10 @@ const IMPORT_SOURCES = ['mnemonic', 'privateKey', 'keystore'] as const;
  */
 export class Web3Remote extends TypertRemoteService {
   private readonly service: WalletService;
-  private readonly approval: ApprovalGateway;
 
-  constructor(ctx: Context, service: WalletService, approval: ApprovalGateway) {
+  constructor(ctx: Context, service: WalletService) {
     super(ctx, 'web3');
     this.service = service;
-    this.approval = approval;
   }
 
   /** Vault status snapshot ({@link WalletService.status}). */
@@ -125,8 +123,16 @@ export class Web3Remote extends TypertRemoteService {
 
   /**
    * Create a fresh HD account (Metamask-style "create a new wallet").
-   * The mnemonic is generated once and returned only when `reveal` is true
-   * AND the host approval gateway allows it.
+   *
+   * The mnemonic is generated once and returned when `reveal` is true. Unlike
+   * the agent tool `wallet_create` (which keeps its reveal behind the
+   * session-bound approval gateway), this panel endpoint is a user-initiated
+   * local UI action: the person sitting in front of DSH web clicked "create
+   * wallet", which is itself the authorization. The DSH approval service is
+   * built for in-turn agent tool calls (`req.agent.session` + open turn) and
+   * cannot be satisfied from a settings-panel RPC carrier — so this endpoint
+   * intentionally does not route through it. Agent access to mnemonics stays
+   * gated on `wallet_create`'s approval.
    */
   async create(request: unknown) {
     const query = (request ?? {}) as CreateRequest;
@@ -141,29 +147,11 @@ export class Web3Remote extends TypertRemoteService {
       if (query.reveal !== true) {
         return { meta: result.meta, mnemonicRevealed: false };
       }
-      let outcome: string;
-      try {
-        outcome = await this.approval.request({
-          toolName: 'wallet_create',
-          reason: `Reveal the mnemonic for the new account ${result.meta.address} (${result.meta.label})?`,
-        });
-      } catch (error) {
-        // No session-bound approver available (e.g. headless RPC): fail safe
-        // and never reveal the mnemonic.
-        await this.service.vault.auditAppend('remote.create_reveal_error', {
-          accountId: result.meta.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return { meta: result.meta, mnemonicRevealed: false };
-      }
-      if (outcome === 'allowed-once') {
-        return { meta: result.meta, mnemonic: result.mnemonic, mnemonicRevealed: true };
-      }
-      await this.service.vault.auditAppend('remote.create_reveal_denied', {
+      await this.service.vault.auditAppend('remote.create_reveal', {
         accountId: result.meta.id,
-        outcome,
+        address: result.meta.address,
       });
-      return { meta: result.meta, mnemonicRevealed: false };
+      return { meta: result.meta, mnemonic: result.mnemonic, mnemonicRevealed: true };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }

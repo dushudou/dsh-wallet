@@ -46,6 +46,41 @@ export interface ChainProvider {
 
 const RECEIPT_TIMEOUT_DEFAULT_MS = 120_000;
 
+/** Probe one JSON-RPC URL with `eth_chainId` and validate the response body. */
+async function probeRpc(url: string, timeoutMs: number): Promise<boolean> {
+  const request = new FetchRequest(url);
+  request.body = JSON.stringify({ jsonrpc: '2.0', method: 'eth_chainId', params: [], id: 1 });
+  const timer = new Promise<'__dshw-timeout__'>((resolve) => {
+    const handle = setTimeout(() => resolve('__dshw-timeout__'), timeoutMs);
+    handle.unref?.();
+  });
+  try {
+    const response = await Promise.race([request.send(), timer]);
+    if (response === '__dshw-timeout__') return false;
+    // A 200 can still carry a JSON-RPC error (e.g. rate-limit/auth bodies),
+    // so accept only a well-formed result with no error member.
+    const body = response.bodyText ?? '';
+    return body.includes('"result"') && !body.includes('"error"');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pick the first reachable JSON-RPC URL from a candidate list.
+ *
+ * Public free endpoints come and go (and some return 200 with an error body),
+ * so the wallet prefers a live endpoint and falls back to the first candidate
+ * when all fail — callers then surface the node error as usual.
+ */
+export async function pickReachableRpc(urls: readonly string[], timeoutMs = 2500): Promise<string> {
+  for (const url of urls) {
+    if (url === undefined || url.length === 0) continue;
+    if (await probeRpc(url, timeoutMs)) return url;
+  }
+  return urls[0] ?? '';
+}
+
 /** Production provider backed by a JSON-RPC endpoint. */
 export class JsonRpcChainProvider implements ChainProvider {
   readonly chainId: number;

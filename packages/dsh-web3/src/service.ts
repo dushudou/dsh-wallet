@@ -194,8 +194,12 @@ export class WalletService {
 
   // ── chain providers ─────────────────────────────────────────────────────
 
-  /** Resolve a provider for a chain (cached). */
-  providerFor(chainId: number): ResolvedProvider {
+  /**
+   * Resolve a provider for a chain (cached). Public free RPC endpoints change
+   * often, so when no custom RPC override is configured the first *reachable*
+   * built-in endpoint is picked (one-time per chain, then cached).
+   */
+  async providerFor(chainId: number): Promise<ResolvedProvider> {
     const cached = this.providers.get(chainId);
     if (cached !== undefined) {
       return { provider: cached, chainId, rpcUrl: (cached as unknown as { __rpcUrl?: string }).__rpcUrl ?? '', custom: true };
@@ -205,11 +209,18 @@ export class WalletService {
     if (custom === undefined && chain === undefined && this.options.createProvider === undefined) {
       throw new Error(`unknown chain ${String(chainId)}: add an rpc override in the wallet plugin config`);
     }
-    const rpcUrl = custom ?? chain?.rpc[0];
-    const provider =
-      this.options.createProvider !== undefined
-        ? this.options.createProvider(chainId, rpcUrl)
-        : JsonRpcChainProvider.forChainId(chainId, custom);
+    let rpcUrl: string | undefined;
+    if (this.options.createProvider !== undefined) {
+      rpcUrl = custom ?? chain?.rpc[0];
+      const provider = this.options.createProvider(chainId, rpcUrl);
+      (provider as unknown as { __rpcUrl?: string }).__rpcUrl = rpcUrl ?? '';
+      this.providers.set(chainId, provider);
+      return { provider, chainId, rpcUrl: rpcUrl ?? '', custom: custom !== undefined };
+    }
+    const candidates = custom !== undefined ? [custom] : chain?.rpc ?? [];
+    const { pickReachableRpc } = await import('dsh-web3-core');
+    rpcUrl = await pickReachableRpc(candidates);
+    const provider = JsonRpcChainProvider.forChainId(chainId, rpcUrl);
     (provider as unknown as { __rpcUrl?: string }).__rpcUrl = rpcUrl ?? '';
     this.providers.set(chainId, provider);
     return {
@@ -233,7 +244,7 @@ export class WalletService {
     tokens: Array<{ address: string; symbol?: string; balance: string; formatted?: string }>;
   }> {
     this.vault.maybeAutoLock();
-    const { provider } = this.providerFor(chainId);
+    const { provider } = await this.providerFor(chainId);
     const result = await accountBalances(provider, account.address, this.tokensFor(chainId));
     const chain = getChain(chainId);
     return {
@@ -271,7 +282,7 @@ export class WalletService {
     chainName?: string;
   }> {
     this.vault.maybeAutoLock();
-    const { provider } = this.providerFor(input.chainId);
+    const { provider } = await this.providerFor(input.chainId);
     const populated = await populateTransaction(input, provider);
     const human = describeTransaction(populated);
     const decision = this.vault.evaluateSignPolicy({
@@ -295,7 +306,7 @@ export class WalletService {
   ): Promise<SendResult> {
     this.vault.maybeAutoLock();
     const meta = this.vault.requireAccount(input.from);
-    const { provider } = this.providerFor(input.chainId);
+    const { provider } = await this.providerFor(input.chainId);
     const populated = await populateTransaction({ ...input, from: meta.address }, provider);
     const human = describeTransaction(populated);
     const decision = this.vault.evaluateSignPolicy({

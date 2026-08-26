@@ -254,6 +254,8 @@ window.__ModuleLoader__.load({
 
 		// ── data fetching (host `web3` Remote namespace over Connection RPC) ──
 		let connectionSvc = null;
+		// The host locale service (uSES-compatible: getSnapshot()/subscribe()).
+		let localeSvc = null;
 
 		async function callHost(method, request) {
 			if (connectionSvc === null) throw new Error("connection service not ready");
@@ -293,6 +295,23 @@ window.__ModuleLoader__.load({
 			}, []);
 			React.useEffect(() => { void load(); }, [load]);
 			return { state, reload: load };
+		}
+
+		// Subscribe to the host locale store so the whole panel re-renders on a
+		// language switch (and when our dictionaries land late). Independent of
+		// the renderer's `t` seat — belt and braces for every host version.
+		function useLocaleVersion() {
+			return React.useSyncExternalStore(
+				React.useCallback((onStoreChange) => {
+					if (!localeSvc || typeof localeSvc.subscribe !== "function") return () => {};
+					return localeSvc.subscribe(onStoreChange);
+				}, []),
+				React.useCallback(() => {
+					if (!localeSvc || typeof localeSvc.getSnapshot !== "function") return 0;
+					const snapshot = localeSvc.getSnapshot();
+					return snapshot && typeof snapshot.revision === "number" ? snapshot.revision : 0;
+				}, []),
+			);
 		}
 
 		function shortAddress(address) {
@@ -667,7 +686,14 @@ window.__ModuleLoader__.load({
 		}
 
 		function WalletPanel(props) {
-			const T = (props && typeof props.t === "function") ? props.t : t;
+			// Prefer the live module `t` when the host locale service is present:
+			// the renderer-injected `props.t` can be bound to a stale revision, so
+			// relying on it alone is what causes "setting Chinese, panel English".
+			const T = localeSvc
+				? t
+				: (props && typeof props.t === "function" ? props.t : t);
+			// Keep the panel in sync with the active DSH language.
+			useLocaleVersion();
 			const { state, reload } = useWalletData();
 			const [view, setView] = React.useState(null);
 			const empty = !state.loading && !state.error && state.accounts.length === 0;
@@ -703,6 +729,7 @@ window.__ModuleLoader__.load({
 			const slots = c.get ? c.get("slots") : c.slots;
 			if (slots === undefined) return;
 			if (c.locale && typeof c.locale.register === "function") {
+				localeSvc = c.locale;
 				c.effect(() => c.locale.register(NS, MESSAGES), "dsh-web3: dictionaries");
 				if (typeof c.locale.bind === "function") t = c.locale.bind(NS);
 			} else {

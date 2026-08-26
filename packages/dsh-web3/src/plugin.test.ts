@@ -8,6 +8,7 @@ import { applyWalletPlugin } from '../src/index.js';
 import { WalletService } from '../src/service.js';
 import { buildTools } from '../src/tools.js';
 import { buildRoutes } from '../src/http.js';
+import { Web3Remote } from '../src/remote.js';
 import { resolvePassphrase, passphraseFromFile, WALLET_PASSPHRASE_REF } from '../src/passphrase.js';
 import { MockChainProvider, ApprovalStub } from '../src/testing.js';
 
@@ -513,7 +514,6 @@ describe('passphrase resolution', () => {
 describe('typert remote (DSH web integration)', () => {
   it('mounts the web3 Remote namespace and serves secret-free read models', async () => {
     const { Context } = await import('@deepseek-ai/cordis');
-    const { Web3Remote } = await import('../src/remote.js');
     const ctx = new Context();
 
     const registeredTools: Array<{ name: string }> = [];
@@ -572,6 +572,22 @@ describe('typert remote (DSH web integration)', () => {
     expect(ctx.get('wallet')).toBeUndefined();
     } finally {
       delete process.env[WALLET_PASSPHRASE_REF];
+    }
+  });
+
+  it('exposes all methods with a single "request" parameter (gateway wire contract)', () => {
+    const methods = ['status', 'accounts', 'balances', 'policy', 'audit', 'chains'] as const;
+    for (const method of methods) {
+      const fn = (Web3Remote.prototype as never as Record<string, () => never>)[method];
+      const source = Function.prototype.toString.call(fn);
+      const open = source.indexOf('(');
+      const close = source.indexOf(')', open + 1);
+      const params = source
+        .slice(open + 1, close)
+        .split(',')
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0);
+      expect(params).toEqual(['request']);
     }
   });
 });

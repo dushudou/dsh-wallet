@@ -55,12 +55,12 @@ export class Web3Remote extends TypertRemoteService {
   }
 
   /** Vault status snapshot ({@link WalletService.status}). */
-  async status(_request: unknown) {
+  async status(request: unknown) {
     return this.service.status();
   }
 
   /** List all accounts (metadata only). */
-  async accounts(_request: unknown) {
+  async accounts(request: unknown) {
     return { accounts: this.service.listAccounts() };
   }
 
@@ -79,7 +79,7 @@ export class Web3Remote extends TypertRemoteService {
   }
 
   /** Current signing policy. */
-  async policy(_request: unknown) {
+  async policy(request: unknown) {
     return { policy: this.service.getPolicy() };
   }
 
@@ -92,7 +92,7 @@ export class Web3Remote extends TypertRemoteService {
   }
 
   /** Built-in chain registry. */
-  async chains(_request: unknown) {
+  async chains(request: unknown) {
     const { listChains } = await import('dsh-web3-core');
     return { chains: listChains() };
   }

@@ -2,14 +2,19 @@
  * Model tool definitions for the wallet plugin.
  *
  * {@link buildTools} constructs the full tool surface from a wallet service and
- * an approval gateway. Each tool has `execute(args, ctx)` and an optional
- * `output.render` for structured model responses.
+ * an approval gateway. Each tool has `execute(args, ctx)` and an `output`
+ * declaration (JSON-Schema + render) matching the DSH `ctx.tools` registry
+ * (`ToolDefinition` shape), so `wallet_*` tools appear in the agent's native
+ * function catalog and can be invoked by the model.
+ *
+ * Parameters use the DSH parameter DSL: an open object root whose properties
+ * carry `{ type, description?, required?, enum? }`; requiredness is a
+ * per-property `required: true` annotation.
  *
  * @module dsh-web3/tools
  */
 
 import type { TypedDataDomain, TypedDataField } from 'ethers';
-import z from '@deepseek-ai/schemastery';
 import { policyPreset } from 'dsh-web3-core';
 import type { ApprovalGateway, WalletService } from './service.js';
 
@@ -25,13 +30,25 @@ export interface OutputBlock {
   text?: string;
 }
 
-/** A single model tool. */
+/** One property in the DSH parameter DSL. */
+export interface ParamSpec {
+  type: string;
+  description?: string;
+  required?: boolean;
+  enum?: unknown[];
+}
+
+/** Tool parameter schema (open object root). */
+export type ToolParameters = Record<string, ParamSpec>;
+
+/** A single model tool, DSH `ToolDefinition`-shaped. */
 export interface WalletTool {
   name: string;
   description: string;
-  parameters: unknown;
+  parameters: ToolParameters;
   execute(args: Record<string, unknown>, ctx: ToolCallContext): Promise<unknown>;
-  output?: {
+  output: {
+    schema: { type: 'object' };
     render(args: Record<string, unknown>, value: unknown): OutputBlock[];
   };
 }
@@ -42,11 +59,16 @@ export interface BuildToolsOptions {
   approval: ApprovalGateway;
 }
 
-const accountSelector = z.string().description('Account id, address, or label.');
-const chainId = z.number().description('EVM chain id (e.g. 1 for Ethereum, 137 for Polygon).');
+const accountSelector: ParamSpec = { type: 'string', description: 'Account id, address, or label.', required: true };
+const chainId: ParamSpec = { type: 'number', description: 'EVM chain id (e.g. 1 for Ethereum, 137 for Polygon).', required: true };
 
 function jsonBlock(value: unknown): OutputBlock[] {
   return [{ type: 'text', text: JSON.stringify(value, null, 2) }];
+}
+
+/** Declare a JSON-object output rendered as pretty JSON text. */
+function jsonOutput(args: Record<string, unknown>, value: unknown): OutputBlock[] {
+  return jsonBlock(value);
 }
 
 /**
@@ -62,52 +84,55 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
     {
       name: 'wallet_status',
       description: 'Get the wallet vault status: locked/unlocked, account count, policy summary, auto-lock interval.',
-      parameters: z.object({}),
+      parameters: {},
       async execute() {
         return service.status();
       },
-      output: { render: (_args, value) => jsonBlock(value) },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_unlock',
       description: 'Unlock the wallet vault. Passphrase resolves from env / credentials store. Optionally read from a 0600 file (deleted after use).',
-      parameters: z.object({
-        passphraseFile: z.string().required(false).description('Absolute path to a 0600 file containing the passphrase.'),
-      }),
+      parameters: {
+        passphraseFile: { type: 'string', description: 'Absolute path to a 0600 file containing the passphrase.' },
+      },
       async execute(args) {
         return service.unlock(args.passphraseFile as string | undefined);
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_lock',
       description: 'Lock the wallet vault, zeroizing all decrypted key material from memory.',
-      parameters: z.object({}),
+      parameters: {},
       async execute() {
         service.lock();
         return { locked: true };
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_list',
       description: 'List all accounts in the vault (metadata only — no private keys or mnemonics).',
-      parameters: z.object({}),
+      parameters: {},
       async execute() {
         return { accounts: service.listAccounts() };
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_create',
       description:
         'Generate a new HD account with a fresh BIP-39 mnemonic. By default the mnemonic is hidden; set reveal=true to show it (requires human approval).',
-      parameters: z.object({
-        label: z.string().required(false).description('Human-readable label.'),
-        words: z.union([12, 15, 18, 21, 24]).required(false).description('Mnemonic word count. Default 12.'),
-        reveal: z.boolean().required(false).description('Whether to reveal the mnemonic in the result. Requires approval.'),
-      }),
+      parameters: {
+        label: { type: 'string', description: 'Human-readable label.' },
+        words: { type: 'number', enum: [12, 15, 18, 21, 24], description: 'Mnemonic word count. Default 12.' },
+        reveal: { type: 'boolean', description: 'Whether to reveal the mnemonic in the result. Requires approval.' },
+      },
       async execute(args, ctx) {
         const result = await service.createAccount({
           label: args.label as string | undefined,
@@ -128,18 +153,19 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
         }
         return { meta: result.meta, mnemonicRevealed: false };
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_import',
       description: 'Import an account from a 0600 secret file (mnemonic, private key, or keystore JSON). File is deleted after reading.',
-      parameters: z.object({
-        source: z.union(['mnemonic', 'privateKey', 'keystore']).description('Type of secret material.'),
-        secretFile: z.string().description('Absolute path to a 0600 file containing the secret.'),
-        keystorePassphraseFile: z.string().required(false).description('Required for keystore: path to the keystore passphrase file.'),
-        label: z.string().required(false).description('Human-readable label.'),
-        index: z.number().required(false).description('HD derivation index for mnemonic imports.'),
-      }),
+      parameters: {
+        source: { type: 'string', enum: ['mnemonic', 'privateKey', 'keystore'], description: 'Type of secret material.', required: true },
+        secretFile: { type: 'string', description: 'Absolute path to a 0600 file containing the secret.', required: true },
+        keystorePassphraseFile: { type: 'string', description: 'Required for keystore: path to the keystore passphrase file.' },
+        label: { type: 'string', description: 'Human-readable label.' },
+        index: { type: 'number', description: 'HD derivation index for mnemonic imports.' },
+      },
       async execute(args) {
         return service.importAccount({
           source: args.source as 'mnemonic' | 'privateKey' | 'keystore',
@@ -149,54 +175,58 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
           index: args.index as number | undefined,
         });
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_remove_account',
       description: 'Remove an account from the vault (deletes its encrypted key file).',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
-      }),
+      },
       async execute(args) {
         const meta = service.vault.requireAccount(args.account as string);
         return service.removeAccount(meta.id);
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_chains',
       description: 'List all built-in EVM chains with their RPC endpoints and explorer URLs.',
-      parameters: z.object({}),
+      parameters: {},
       async execute() {
         const { listChains } = await import('dsh-web3-core');
         return { chains: listChains() };
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_balance',
       description: 'Get native and configured token balances for an account on a chain.',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
         chainId,
-      }),
+      },
       async execute(args) {
         const meta = service.vault.requireAccount(args.account as string);
         return service.balances(meta, args.chainId as number);
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_prepare_transaction',
       description:
         'Dry-run: populate a transaction (nonce, gas, fees) and evaluate the signing policy. No key material is touched and nothing is broadcast.',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
         chainId,
-        to: z.string().description('Recipient address.'),
-        value: z.string().required(false).description('Amount in wei (decimal string). Default 0.'),
-        data: z.string().required(false).description('Calldata (0x-prefixed hex).'),
-      }),
+        to: { type: 'string', description: 'Recipient address.', required: true },
+        value: { type: 'string', description: 'Amount in wei (decimal string). Default 0.' },
+        data: { type: 'string', description: 'Calldata (0x-prefixed hex).' },
+      },
       async execute(args) {
         const meta = service.vault.requireAccount(args.account as string);
         return service.prepareTransaction({
@@ -207,19 +237,20 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
           data: args.data as string | undefined,
         });
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_send_transaction',
       description:
         'Full transaction flow: populate → policy → approval (when ask) → sign → broadcast. Returns the tx hash and explorer link on success.',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
         chainId,
-        to: z.string().description('Recipient address.'),
-        value: z.string().required(false).description('Amount in wei (decimal string). Default 0.'),
-        data: z.string().required(false).description('Calldata (0x-prefixed hex).'),
-      }),
+        to: { type: 'string', description: 'Recipient address.', required: true },
+        value: { type: 'string', description: 'Amount in wei (decimal string). Default 0.' },
+        data: { type: 'string', description: 'Calldata (0x-prefixed hex).' },
+      },
       async execute(args, ctx) {
         const meta = service.vault.requireAccount(args.account as string);
         return service.sendTransaction(
@@ -234,15 +265,16 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
           { toolName: 'wallet_send_transaction', callId: ctx.callId, signal: ctx.signal },
         );
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_sign_message',
       description: 'Sign an EIP-191 personal message under the signing policy. Requires policy allow or human approval.',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
-        message: z.string().description('The message text to sign.'),
-      }),
+        message: { type: 'string', description: 'The message text to sign.', required: true },
+      },
       async execute(args, ctx) {
         return service.signMessage(
           { account: args.account as string, message: args.message as string },
@@ -250,17 +282,18 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
           { toolName: 'wallet_sign_message', callId: ctx.callId, signal: ctx.signal },
         );
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_sign_typed_data',
       description: 'Sign EIP-712 typed data under the signing policy. Requires policy allow or human approval.',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
-        domain: z.object({}).loose().description('EIP-712 domain object.'),
-        types: z.object({}).loose().description('EIP-712 type definitions.'),
-        value: z.object({}).loose().description('The data values to sign.'),
-      }),
+        domain: { type: 'json', description: 'EIP-712 domain object.' },
+        types: { type: 'json', description: 'EIP-712 type definitions.' },
+        value: { type: 'json', description: 'The data values to sign.' },
+      },
       async execute(args, ctx) {
         return service.signTypedData(
           {
@@ -273,25 +306,27 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
           { toolName: 'wallet_sign_typed_data', callId: ctx.callId, signal: ctx.signal },
         );
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_policy_get',
       description: 'Get the current signing policy (rules, default effect, presets).',
-      parameters: z.object({}),
+      parameters: {},
       async execute() {
         return { policy: service.getPolicy() };
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_policy_set',
       description:
         'Replace the signing policy. Accepts a preset name (locked, strict, testnet, power) or a full policy document. Requires human approval.',
-      parameters: z.object({
-        preset: z.union(['locked', 'strict', 'testnet', 'power']).required(false).description('Apply a built-in preset.'),
-        policy: z.object({}).loose().required(false).description('Full policy document.'),
-      }),
+      parameters: {
+        preset: { type: 'string', enum: ['locked', 'strict', 'testnet', 'power'], description: 'Apply a built-in preset.' },
+        policy: { type: 'json', description: 'Full policy document.' },
+      },
       async execute(args, ctx) {
         const outcome = await approval.request({
           toolName: 'wallet_policy_set',
@@ -313,15 +348,16 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
         }
         return { updated: false, error: 'neither preset nor policy provided' };
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_reveal_secret',
       description: 'Reveal the mnemonic or private key for an account. ALWAYS requires human approval. The secret is returned once.',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
-        kind: z.union(['mnemonic', 'privateKey']).description('Which secret to reveal.'),
-      }),
+        kind: { type: 'string', enum: ['mnemonic', 'privateKey'], description: 'Which secret to reveal.', required: true },
+      },
       async execute(args, ctx) {
         const meta = service.vault.requireAccount(args.account as string);
         const outcome = await approval.request({
@@ -337,32 +373,34 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
         const secret = await service.revealSecret(meta.id, args.kind as 'mnemonic' | 'privateKey');
         return { ...secret, revealed: true };
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_export_keystore',
       description: 'Export an account as a Web3 Secret Storage keystore JSON (encrypted with a new passphrase).',
-      parameters: z.object({
+      parameters: {
         account: accountSelector,
-        keystorePassphrase: z.string().description('Passphrase to encrypt the exported keystore.'),
-      }),
+        keystorePassphrase: { type: 'string', description: 'Passphrase to encrypt the exported keystore.', required: true },
+      },
       async execute(args) {
         const meta = service.vault.requireAccount(args.account as string);
         return service.exportKeystore(meta.id, args.keystorePassphrase as string);
       },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
 
     {
       name: 'wallet_audit_log',
       description: 'Recent security audit entries: signing decisions, approvals, policy changes. Secret-free by construction.',
-      parameters: z.object({
-        limit: z.natural().required(false).description('Maximum entries to return. Default 30.'),
-      }),
+      parameters: {
+        limit: { type: 'integer', description: 'Maximum entries to return. Default 30.' },
+      },
       async execute(args) {
         const limit = typeof args.limit === 'number' ? args.limit : 30;
         return { entries: await service.recentAudit(limit) };
       },
-      output: { render: (_args, value) => jsonBlock(value) },
+      output: { schema: { type: 'object' }, render: jsonOutput },
     },
   ];
 

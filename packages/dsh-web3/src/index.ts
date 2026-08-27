@@ -16,6 +16,7 @@ import { defaultVaultPath, WalletService, type ApprovalGateway } from './service
 import { buildTools } from './tools.js';
 import { buildRoutes } from './http.js';
 import { Web3Remote } from './remote.js';
+import { syncBundledSkill } from './skills.js';
 
 export type { WalletService, ApprovalGateway, SendResult, SignMessageResult } from './service.js';
 export type { PluginConfigValue } from './config.js';
@@ -67,6 +68,10 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
   // The disposers registered during startup, run in reverse on unload.
   const disposers: Array<() => void | Promise<void>> = [];
 
+  // Mirror the bundled wallet skill into the DSH user skill root so the agent
+  // catalog exposes `dsh-web3-wallet` to every session (best-effort, async).
+  void syncBundledSkill(logger);
+
   // Open the vault (initializes on first run).
   const vaultPromise = WalletVault.open({
     directory: config.vaultPath,
@@ -99,31 +104,59 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
     logger.info('wallet service mounted at ctx.wallet');
   });
 
-  // Register model tools.
+  // Register model tools on the DSH ToolRuntime (`ctx.tools`), which feeds the
+  // agent's native function catalog. A legacy `model.tools` service is used as
+  // a fallback for hosts that expose only that surface.
   if (!config.disableTools) {
-    const modelTools = ctx.get('model.tools') as
+    const toolsRuntime = ctx.get('tools') as
       | {
-          register(tool: {
+          register(definition: {
             name: string;
             description: string;
-            parameters: unknown;
-            execute: (args: Record<string, unknown>, toolCtx: { callId?: string; signal?: AbortSignal }) => Promise<unknown>;
-            output?: { render: (args: Record<string, unknown>, value: unknown) => Array<{ type: string; text?: string }> };
+            parameters: Record<string, unknown>;
+            output: {
+              schema: unknown;
+              render: (args: unknown, value: unknown) => Array<{ type: string; text?: string }>;
+            };
+            execute: (args: Record<string, unknown>, exec: { callId?: string; signal?: AbortSignal }) => Promise<unknown>;
           }): () => void;
         }
       | undefined;
 
-    if (modelTools !== undefined) {
+    if (toolsRuntime !== undefined) {
       servicePromise.then((service) => {
         const tools = buildTools({ service, approval: resolveApproval(ctx) });
         for (const tool of tools) {
-          const dispose = modelTools.register(tool);
+          const dispose = toolsRuntime.register(tool as never);
           disposers.push(dispose);
         }
-        logger.info(`registered ${tools.length} wallet model tools`);
+        logger.info(`registered ${tools.length} wallet model tools on ctx.tools`);
       });
     } else {
-      logger.warn('model.tools service not available; skipping tool registration');
+      const modelTools = ctx.get('model.tools') as
+        | {
+            register(tool: {
+              name: string;
+              description: string;
+              parameters: unknown;
+              execute: (args: Record<string, unknown>, toolCtx: { callId?: string; signal?: AbortSignal }) => Promise<unknown>;
+              output?: { render: (args: Record<string, unknown>, value: unknown) => Array<{ type: string; text?: string }> };
+            }): () => void;
+          }
+        | undefined;
+
+      if (modelTools !== undefined) {
+        servicePromise.then((service) => {
+          const tools = buildTools({ service, approval: resolveApproval(ctx) });
+          for (const tool of tools) {
+            const dispose = modelTools.register(tool);
+            disposers.push(dispose);
+          }
+          logger.info(`registered ${tools.length} wallet model tools (legacy model.tools)`);
+        });
+      } else {
+        logger.warn('neither ctx.tools nor model.tools available; skipping tool registration');
+      }
     }
   }
 

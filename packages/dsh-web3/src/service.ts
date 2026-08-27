@@ -200,32 +200,34 @@ export class WalletService {
    * built-in endpoint is picked (one-time per chain, then cached).
    */
   async providerFor(chainId: number): Promise<ResolvedProvider> {
-    const cached = this.providers.get(chainId);
+    // Normalize: model arguments may arrive as a numeric string ("1").
+    const id = Number(chainId);
+    const cached = this.providers.get(id);
     if (cached !== undefined) {
-      return { provider: cached, chainId, rpcUrl: (cached as unknown as { __rpcUrl?: string }).__rpcUrl ?? '', custom: true };
+      return { provider: cached, chainId: id, rpcUrl: (cached as unknown as { __rpcUrl?: string }).__rpcUrl ?? '', custom: true };
     }
-    const custom = this.options.rpcOverrides[String(chainId)];
-    const chain = getChain(chainId);
+    const custom = this.options.rpcOverrides[String(id)];
+    const chain = getChain(id);
     if (custom === undefined && chain === undefined && this.options.createProvider === undefined) {
-      throw new Error(`unknown chain ${String(chainId)}: add an rpc override in the wallet plugin config`);
+      throw new Error(`unknown chain ${String(id)}: add an rpc override in the wallet plugin config`);
     }
     let rpcUrl: string | undefined;
     if (this.options.createProvider !== undefined) {
       rpcUrl = custom ?? chain?.rpc[0];
-      const provider = this.options.createProvider(chainId, rpcUrl);
+      const provider = this.options.createProvider(id, rpcUrl);
       (provider as unknown as { __rpcUrl?: string }).__rpcUrl = rpcUrl ?? '';
-      this.providers.set(chainId, provider);
-      return { provider, chainId, rpcUrl: rpcUrl ?? '', custom: custom !== undefined };
+      this.providers.set(id, provider);
+      return { provider, chainId: id, rpcUrl: rpcUrl ?? '', custom: custom !== undefined };
     }
     const candidates = custom !== undefined ? [custom] : chain?.rpc ?? [];
     const { pickReachableRpc } = await import('dsh-web3-core');
     rpcUrl = await pickReachableRpc(candidates);
-    const provider = JsonRpcChainProvider.forChainId(chainId, rpcUrl);
+    const provider = JsonRpcChainProvider.forChainId(id, rpcUrl);
     (provider as unknown as { __rpcUrl?: string }).__rpcUrl = rpcUrl ?? '';
-    this.providers.set(chainId, provider);
+    this.providers.set(id, provider);
     return {
       provider,
-      chainId,
+      chainId: id,
       rpcUrl: rpcUrl ?? '',
       custom: custom !== undefined,
     };

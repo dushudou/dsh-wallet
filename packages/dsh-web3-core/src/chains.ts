@@ -125,8 +125,8 @@ const REGISTRY: ChainInfo[] = [
     rpc: [
       'https://ethereum-sepolia-rpc.publicnode.com',
       'https://sepolia.gateway.tenderly.co',
+      'https://sepolia.drpc.org',
       'https://1rpc.io/sepolia',
-      'https://rpc.sepolia.org',
     ],
     explorer: 'https://sepolia.etherscan.io',
     testnet: true,

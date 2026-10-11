@@ -67,9 +67,12 @@ Requires Node >= 20.
 ## Status
 
 - [x] Core: vault, crypto, accounts, signing (EIP-1559 / 191 / 712), policy engine, spend tracking, audit, redaction, chain registry, providers
-- [x] Core: 68 unit tests
+- [x] 191 unit / integration tests
 - [x] Plugin: wallet service, config schema, passphrase resolution, secret-file intake
-- [x] Plugin: model tools registration (18 `wallet_*` tools)
+- [x] Plugin: model tools registration (29 `wallet_*` tools)
+- [x] Intent-aware policy guardrails (token transfers / approvals / permits never auto-signed by value-only rules)
+- [x] Human-unit transfers, prepare → execute with `preparedId`, idempotency keys, transaction journal, speed-up / cancel
+- [x] Structured error codes with recovery hints; key material never returned to the model by default
 - [x] Plugin: read-only HTTP endpoints (`/api/dsh-web3/*`)
 - [x] Plugin: web UI client (settings panel, DSH module-loader format)
 - [x] Integration tests (plugin entrypoint mount / tools / routes / unload)

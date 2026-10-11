@@ -15,7 +15,61 @@ import type {
   PolicyRule,
   PolicySummary,
   SigningPolicy,
+  TokenLimit,
 } from './types.js';
+import {
+  AMOUNT_INTENTS,
+  SENSITIVE_INTENTS,
+  classifySerializedTypedData,
+  classifyTransaction,
+  type Intent,
+  type IntentKind,
+} from '../intent.js';
+
+const INTENT_KINDS: readonly IntentKind[] = [
+  'native-transfer',
+  'token-transfer',
+  'token-approve',
+  'token-revoke',
+  'nft-transfer',
+  'nft-approval',
+  'contract-call',
+  'permit',
+  'permit-transfer',
+  'transfer-authorization',
+  'order',
+  'typed-data',
+  'message',
+];
+
+/** Intents whose amount counts toward a token's rolling-24h cap (value leaves the wallet). */
+const SPENDING_INTENTS: readonly IntentKind[] = ['token-transfer', 'permit-transfer', 'transfer-authorization'];
+
+/**
+ * Coerce a chain id that may arrive as a numeric string or bigint (model
+ * arguments, JSON typed-data domains) into a number, so `chainIds` matchers —
+ * deny rules included — cannot be sidestepped by a type mismatch.
+ */
+export function normalizeChainId(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'string' && /^(0x[0-9a-fA-F]+|\d+)$/.test(value.trim())) return Number(BigInt(value.trim()));
+  return undefined;
+}
+
+/** The decoded intent of a request (explicit, or derived from its payload). */
+export function intentOf(request: PolicyRequest): Intent | undefined {
+  if (request.intent !== undefined) return request.intent;
+  if (request.type === 'signTransaction') return classifyTransaction({ to: request.to, value: request.value, data: request.data });
+  if (request.type === 'signTypedData') return classifySerializedTypedData(request.typedData) ?? { kind: 'typed-data' };
+  return { kind: 'message' };
+}
+
+/** Where assets actually go: the decoded recipient, else the tx `to`. */
+function effectiveRecipient(request: PolicyRequest): string | undefined {
+  return request.intent?.recipient ?? request.to;
+}
 
 /** Extract the 4-byte selector from calldata, or undefined. */
 export function selectorOfData(data: string | undefined): string | undefined {
@@ -28,10 +82,11 @@ export function selectorOfData(data: string | undefined): string | undefined {
 
 /** Build the secret-free summary of a request. */
 export function summarizeRequest(request: PolicyRequest): PolicySummary {
+  const intent = intentOf(request);
   return {
     type: request.type,
     from: request.account?.address,
-    chainId: request.chainId,
+    chainId: normalizeChainId(request.chainId),
     to: request.to,
     valueWei: request.value,
     dataLengthBytes: request.data !== undefined ? (request.data.length - 2) / 2 : undefined,
@@ -42,6 +97,12 @@ export function summarizeRequest(request: PolicyRequest): PolicySummary {
         : request.typedData !== undefined
           ? Buffer.byteLength(request.typedData, 'utf8')
           : undefined,
+    ...(intent !== undefined ? { intent: intent.kind } : {}),
+    ...(intent?.token !== undefined ? { token: intent.token } : {}),
+    ...(intent?.recipient !== undefined ? { recipient: intent.recipient } : {}),
+    ...(intent?.spender !== undefined ? { spender: intent.spender } : {}),
+    ...(intent?.amount !== undefined ? { amount: intent.amount } : {}),
+    ...(intent?.unlimited === true ? { unlimited: true } : {}),
   };
 }
 
@@ -56,9 +117,35 @@ function addressList(value: string | string[] | undefined): string[] | undefined
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function matchOneRule(rule: PolicyRule, request: PolicyRequest, spentLast24hWei: bigint): {
+/** Minimal view of a signed operation, for count / cooldown / first-seen checks. */
+export interface PolicyEventView {
+  ts: number;
+  from: string;
+  to?: string;
+}
+
+/** Extra evaluation inputs beyond the request (spend-derived history). */
+export interface PolicyContext {
+  /** Rolling-24h already-signed value (transactions), wei. */
+  spentLast24hWei?: bigint;
+  /** Signed-operation history for count / cooldown / first-seen checks. */
+  events?: PolicyEventView[];
+  /** Evaluation timestamp (defaults to Date.now()); pass a fixed value for determinism. */
+  now?: number;
+  /** Rolling-24h amount already spent of the intent's token (atomic units). */
+  tokenSpentLast24h?: bigint;
+}
+
+function matchOneRule(
+  rule: PolicyRule,
+  request: PolicyRequest,
+  spentLast24hWei: bigint,
+  events: PolicyEventView[] = [],
+  now = Date.now(),
+): {
   matched: boolean;
   withinDailyCap: boolean;
+  forceAsk?: boolean;
   reason: string;
 } {
   const match = rule.match ?? {};
@@ -66,6 +153,21 @@ function matchOneRule(rule: PolicyRule, request: PolicyRequest, spentLast24hWei:
   const types = match.type === undefined ? undefined : Array.isArray(match.type) ? match.type : [match.type];
   if (types !== undefined && !types.includes(request.type)) {
     return { matched: false, withinDailyCap: true, reason: `operation type ${request.type} not in rule` };
+  }
+
+  if (match.intents !== undefined && match.intents.length > 0) {
+    const kind = request.intent?.kind;
+    if (kind === undefined || !match.intents.includes(kind)) {
+      return { matched: false, withinDailyCap: true, reason: `intent ${String(kind)} not in rule` };
+    }
+  }
+
+  const recipientList = addressList(match.recipients);
+  if (recipientList !== undefined) {
+    const recipient = effectiveRecipient(request);
+    if (recipient === undefined || !recipientList.includes(normalizeAddress(recipient))) {
+      return { matched: false, withinDailyCap: true, reason: 'recipient not in rule recipients' };
+    }
   }
 
   if (match.chainIds !== undefined && request.chainId === undefined) {
@@ -130,6 +232,72 @@ function matchOneRule(rule: PolicyRule, request: PolicyRequest, spentLast24hWei:
     }
   }
 
+  // Per-asset allowlist: tx `to` / typed-data verifying contract must be whitelisted.
+  if (match.allowedAssets !== undefined && match.allowedAssets.length > 0) {
+    const target = request.to;
+    if (target === undefined) {
+      return { matched: false, withinDailyCap: true, reason: 'request has no asset target' };
+    }
+    const wanted = match.allowedAssets.map(normalizeAddress);
+    if (!wanted.includes(normalizeAddress(target))) {
+      return { matched: false, withinDailyCap: true, reason: 'asset target not in rule allowlist' };
+    }
+  }
+
+  // Daily operation-count gate (transactions only; spend history is tx-scoped).
+  if (match.maxCountPerDay !== undefined && request.type === 'signTransaction') {
+    const floor = now - 24 * 60 * 60 * 1000;
+    const from = request.account?.address?.toLowerCase() ?? '';
+    let count = 0;
+    for (const event of events) {
+      if (event.ts >= floor && event.from.toLowerCase() === from) count += 1;
+    }
+    if (count + 1 > match.maxCountPerDay) {
+      return {
+        matched: true,
+        withinDailyCap: false,
+        reason: `rolling-24h operation count cap of ${String(match.maxCountPerDay)} exceeded`,
+      };
+    }
+  }
+
+  // Per-recipient cooldown (transactions only).
+  const recipient = effectiveRecipient(request);
+  if (match.cooldownSeconds !== undefined && recipient !== undefined && request.type === 'signTransaction') {
+    const from = request.account?.address?.toLowerCase() ?? '';
+    const to = normalizeAddress(recipient);
+    let lastTs = 0;
+    for (const event of events) {
+      if (event.from.toLowerCase() === from && event.to !== undefined && normalizeAddress(event.to) === to && event.ts > lastTs) {
+        lastTs = event.ts;
+      }
+    }
+    if (now - lastTs < match.cooldownSeconds * 1000) {
+      return {
+        matched: true,
+        withinDailyCap: false,
+        reason: `recipient in cooldown (${String(match.cooldownSeconds)}s since last op)`,
+      };
+    }
+  }
+
+  // First-seen gate: force approval for recipients never seen before (and not allowlisted).
+  if (match.firstSeenAsk === true && recipient !== undefined) {
+    const from = request.account?.address?.toLowerCase() ?? '';
+    const to = normalizeAddress(recipient);
+    const allowlisted = (addressList(match.to)?.includes(to) ?? false) || (recipientList?.includes(to) ?? false);
+    let seen = false;
+    for (const event of events) {
+      if (event.from.toLowerCase() === from && event.to !== undefined && normalizeAddress(event.to) === to) {
+        seen = true;
+        break;
+      }
+    }
+    if (!allowlisted && !seen) {
+      return { matched: true, withinDailyCap: true, forceAsk: true, reason: 'recipient not seen before; requiring approval' };
+    }
+  }
+
   if (match.maxDataLength !== undefined) {
     const length = request.data !== undefined ? (request.data.length - 2) / 2 : 0;
     if (length > match.maxDataLength) {
@@ -176,28 +344,107 @@ export function evaluatePolicy(
   policy: SigningPolicy,
   request: PolicyRequest,
   spentLast24hWei = 0n,
+  context: PolicyContext = {},
 ): PolicyDecision {
-  const summary = summarizeRequest(request);
+  // Normalize before matching: a string chain id or an undecoded payload must
+  // never let a request slip past a deny rule or a guardrail.
+  const chainId = normalizeChainId(request.chainId);
+  const normalized: PolicyRequest = { ...request, ...(chainId !== undefined ? { chainId } : {}) };
+  if (request.chainId !== undefined && chainId === undefined) delete normalized.chainId;
+  const intent = intentOf(normalized);
+  if (intent !== undefined) normalized.intent = intent;
+
+  const summary = summarizeRequest(normalized);
+  const events = context.events ?? [];
+  const now = context.now ?? Date.now();
+  const gateMatch =
+    (rule: PolicyRule): boolean =>
+      rule.match.maxValuePerDay !== undefined ||
+      rule.match.maxCountPerDay !== undefined ||
+      rule.match.cooldownSeconds !== undefined ||
+      rule.match.firstSeenAsk === true;
   for (const rule of orderedRules(policy)) {
-    const outcome = matchOneRule(rule, request, spentLast24hWei);
+    const outcome = matchOneRule(rule, normalized, spentLast24hWei, events, now);
     if (!outcome.matched) continue;
+    // A matched allow rule is downgraded to `ask` when a gate (daily value/count
+    // cap, cooldown, first-seen) is tripped; first-seen also forces approval.
+    const gated = outcome.forceAsk === true || (rule.effect === 'allow' && outcome.withinDailyCap === false);
+    let effect: PolicyEffect = gated ? 'ask' : rule.effect;
+    let reason = outcome.reason;
+    let guardrail: string | undefined;
+    if (effect === 'allow' && intent !== undefined) {
+      const tripped = guardrailFor(rule, intent, context.tokenSpentLast24h ?? 0n);
+      if (tripped !== undefined) {
+        effect = 'ask';
+        guardrail = tripped.id;
+        reason = tripped.reason;
+      }
+    }
     const description = rule.description !== undefined ? ` (${rule.description})` : '';
     return {
-      effect: rule.effect,
+      effect,
       ruleId: rule.id,
-      reason: `matched rule "${rule.id}"${description}: ${outcome.reason}`,
+      reason: `matched rule "${rule.id}"${description}: ${reason}`,
       request: summary,
-      ...(rule.match.maxValuePerDay !== undefined ? { withinDailyCap: outcome.withinDailyCap } : {}),
+      ...(gateMatch(rule) ? { withinDailyCap: outcome.withinDailyCap } : {}),
+      ...(guardrail !== undefined ? { guardrail } : {}),
       ...(request.type === 'signTransaction' ? { spentLast24hWei: spentLast24hWei.toString() } : {}),
     };
   }
   const fallback: PolicyEffect = policy.defaultEffect;
+  // The default effect is a blanket rule: it never auto-signs sensitive intents.
+  if (fallback === 'allow' && intent !== undefined && SENSITIVE_INTENTS.includes(intent.kind)) {
+    return {
+      effect: 'ask',
+      reason: `no rule matched; default "allow" does not cover ${intent.kind} (requires an explicit rule)`,
+      request: summary,
+      guardrail: 'intent-not-covered',
+      ...(request.type === 'signTransaction' ? { spentLast24hWei: spentLast24hWei.toString() } : {}),
+    };
+  }
   return {
     effect: fallback,
     reason: `no rule matched; policy default is "${fallback}"`,
     request: summary,
     ...(request.type === 'signTransaction' ? { spentLast24hWei: spentLast24hWei.toString() } : {}),
   };
+}
+
+function limitFor(limits: TokenLimit[] | undefined, token: string | undefined): TokenLimit | undefined {
+  if (limits === undefined) return undefined;
+  const wanted = token?.toLowerCase();
+  return (
+    (wanted !== undefined ? limits.find((limit) => limit.token.toLowerCase() === wanted) : undefined) ??
+    limits.find((limit) => limit.token === '*')
+  );
+}
+
+/**
+ * Built-in guardrails applied on top of an `allow` rule. Rules written for
+ * native value (`maxTxValue`, `chainIds` …) must not silently authorize token
+ * moves or permissions, because those carry `value: 0`.
+ */
+function guardrailFor(rule: PolicyRule, intent: Intent, tokenSpentLast24h: bigint): { id: string; reason: string } | undefined {
+  if (!SENSITIVE_INTENTS.includes(intent.kind)) return undefined;
+  if (intent.unlimited === true) {
+    return { id: 'unlimited-permission', reason: `${intent.kind} grants an unlimited permission; always requires human approval` };
+  }
+  if (!(rule.match.intents ?? []).includes(intent.kind)) {
+    return { id: 'intent-not-covered', reason: `${intent.kind} is not explicitly listed in the rule's intents; requiring approval` };
+  }
+  if (!AMOUNT_INTENTS.includes(intent.kind)) return undefined;
+  const limit = limitFor(rule.match.tokenLimits, intent.token);
+  if (limit === undefined) {
+    return { id: 'token-not-limited', reason: `token ${String(intent.token)} has no tokenLimits entry in the rule; requiring approval` };
+  }
+  const amount = BigInt(intent.amount ?? '0');
+  if (limit.maxPerTx !== undefined && amount > BigInt(limit.maxPerTx)) {
+    return { id: 'token-per-tx-cap', reason: `token amount ${amount.toString()} exceeds the per-operation cap ${limit.maxPerTx}` };
+  }
+  if (limit.maxPerDay !== undefined && SPENDING_INTENTS.includes(intent.kind) && tokenSpentLast24h + amount > BigInt(limit.maxPerDay)) {
+    return { id: 'token-daily-cap', reason: `rolling-24h token cap ${limit.maxPerDay} would be exceeded` };
+  }
+  return undefined;
 }
 
 /** Structural validation used before persisting a policy document. */
@@ -224,6 +471,43 @@ export function validatePolicy(policy: SigningPolicy): string[] {
     }
     if (rule.match.maxValuePerDay !== undefined && !/^\d+$/.test(rule.match.maxValuePerDay)) {
       errors.push(`rules[${String(index)}].match.maxValuePerDay must be a decimal wei string`);
+    }
+    if (rule.match.maxCountPerDay !== undefined && (!Number.isInteger(rule.match.maxCountPerDay) || rule.match.maxCountPerDay < 0)) {
+      errors.push(`rules[${String(index)}].match.maxCountPerDay must be a non-negative integer`);
+    }
+    if (rule.match.cooldownSeconds !== undefined && (!Number.isInteger(rule.match.cooldownSeconds) || rule.match.cooldownSeconds < 0)) {
+      errors.push(`rules[${String(index)}].match.cooldownSeconds must be a non-negative integer`);
+    }
+    if (rule.match.allowedAssets !== undefined && !Array.isArray(rule.match.allowedAssets)) {
+      errors.push(`rules[${String(index)}].match.allowedAssets must be an array of addresses`);
+    }
+    if (rule.match.firstSeenAsk !== undefined && typeof rule.match.firstSeenAsk !== 'boolean') {
+      errors.push(`rules[${String(index)}].match.firstSeenAsk must be a boolean`);
+    }
+    if (rule.match.intents !== undefined) {
+      if (!Array.isArray(rule.match.intents) || rule.match.intents.some((kind) => !INTENT_KINDS.includes(kind))) {
+        errors.push(`rules[${String(index)}].match.intents must list known intents (${INTENT_KINDS.join(', ')})`);
+      }
+    }
+    if (rule.match.recipients !== undefined && !Array.isArray(rule.match.recipients)) {
+      errors.push(`rules[${String(index)}].match.recipients must be an array of addresses`);
+    }
+    if (rule.match.tokenLimits !== undefined) {
+      if (!Array.isArray(rule.match.tokenLimits)) {
+        errors.push(`rules[${String(index)}].match.tokenLimits must be an array`);
+      } else {
+        for (const [limitIndex, limit] of rule.match.tokenLimits.entries()) {
+          const where = `rules[${String(index)}].match.tokenLimits[${String(limitIndex)}]`;
+          if (typeof limit?.token !== 'string' || (limit.token !== '*' && !/^0x[0-9a-fA-F]{40}$/.test(limit.token))) {
+            errors.push(`${where}.token must be a 0x address or "*"`);
+          }
+          for (const key of ['maxPerTx', 'maxPerDay'] as const) {
+            if (limit?.[key] !== undefined && !/^\d+$/.test(String(limit[key]))) {
+              errors.push(`${where}.${key} must be a decimal atomic-unit string`);
+            }
+          }
+        }
+      }
     }
   }
   return errors;

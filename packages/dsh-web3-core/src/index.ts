@@ -13,12 +13,47 @@ export * from './account.js';
 export * from './chains.js';
 export * from './redact.js';
 export * from './audit.js';
+export * from './tokens.js';
+export * from './intent.js';
+export { TxJournal } from './journal.js';
+export type { JournalEntry, JournalStatus } from './journal.js';
+export { AddressBook } from './addressbook.js';
+export {
+  defaultLimits,
+  validateLimits,
+  normalizeLimits,
+  checkLimits,
+  limitUsage,
+  isTighteningLimits,
+  hasLimits,
+} from './limits.js';
+export type { WalletLimits, AssetCap, LimitRequest, LimitContext, LimitVerdict, SpendWindowEvent } from './limits.js';
+export type { AddressBookEntry } from './addressbook.js';
 export { WalletVault, VaultLockedError, AccountNotFoundError } from './vault.js';
 export type { AccountSecret, UnlockedAccount, VaultConfig } from './vault.js';
 export * from './signer.js';
 export * from './provider.js';
 export * from './policy/types.js';
-export { evaluatePolicy, validatePolicy, summarizeRequest, selectorOfData, orderedRules } from './policy/evaluate.js';
+export {
+  evaluatePolicy,
+  validatePolicy,
+  summarizeRequest,
+  selectorOfData,
+  orderedRules,
+  normalizeChainId,
+  intentOf,
+} from './policy/evaluate.js';
 export { policyPreset, detectPreset } from './policy/presets.js';
 export type { PolicyPresetId } from './policy/presets.js';
 export { SpendTracker } from './policy/spend.js';
+export {
+  PinGuard,
+  PinRequiredError,
+  PinLockedError,
+  PinInvalidError,
+  PinPepperUnavailableError,
+  PIN_MAX_FAILURES,
+  PIN_MIN_LENGTH,
+  PIN_MAX_LENGTH,
+} from './pin.js';
+export type { PinFile, PinPepperSource, PinStateFile, PinStatus } from './pin.js';

@@ -14,9 +14,10 @@ import type { Context } from '@deepseek-ai/cordis';
 import { PluginConfig, type PluginConfigValue } from './config.js';
 import { defaultVaultPath, WalletService, type ApprovalGateway } from './service.js';
 import { buildTools } from './tools.js';
+import { createSecretStore, type SecretStoreMode } from './keychain.js';
 import { buildRoutes } from './http.js';
 import { Web3Remote } from './remote.js';
-import { syncBundledSkill } from './skills.js';
+import { provideBundledSkill } from './skills.js';
 
 export type { WalletService, ApprovalGateway, SendResult, SignMessageResult } from './service.js';
 export type { PluginConfigValue } from './config.js';
@@ -29,10 +30,19 @@ interface ResolvedConfig {
   vaultPath: string;
   autoLockMs: number;
   passphraseMode: 'auto' | 'env' | 'manual';
+  secretStore: SecretStoreMode;
   rpcOverrides: Record<string, string>;
   tokens: Record<string, Array<{ address: string; symbol?: string }>>;
   disableTools: boolean;
   disableHttp: boolean;
+  allowModelSecretReveal: boolean;
+}
+
+/** Config wins over `DSH_WEB3_SECRET_STORE`, which only refines `auto`. */
+function resolveSecretStoreMode(configured: PluginConfigValue['secretStore']): SecretStoreMode {
+  if (configured !== undefined && configured !== 'auto') return configured;
+  const fromEnv = process.env.DSH_WEB3_SECRET_STORE;
+  return fromEnv === 'keychain' || fromEnv === 'none' ? fromEnv : 'auto';
 }
 
 function resolveConfig(raw: PluginConfigValue): ResolvedConfig {
@@ -40,10 +50,12 @@ function resolveConfig(raw: PluginConfigValue): ResolvedConfig {
     vaultPath: raw.vaultPath ?? defaultVaultPath(),
     autoLockMs: raw.autoLockMs ?? 900_000,
     passphraseMode: raw.passphrase?.mode ?? 'auto',
+    secretStore: resolveSecretStoreMode(raw.secretStore),
     rpcOverrides: raw.chains?.rpc ?? {},
     tokens: raw.chains?.tokens ?? {},
     disableTools: raw.disableTools ?? false,
     disableHttp: raw.disableHttp ?? false,
+    allowModelSecretReveal: raw.unsafeAllowModelSecretReveal ?? false,
   };
 }
 
@@ -68,9 +80,9 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
   // The disposers registered during startup, run in reverse on unload.
   const disposers: Array<() => void | Promise<void>> = [];
 
-  // Mirror the bundled wallet skill into the DSH user skill root so the agent
-  // catalog exposes `dsh-web3-wallet` to every session (best-effort, async).
-  void syncBundledSkill(logger);
+  // Serve the bundled `dsh-web3-wallet` skill through the DSH skill registry
+  // (falls back to a marked mirror in the user skill folder on older hosts).
+  provideBundledSkill(ctx, logger);
 
   // Open the vault (initializes on first run).
   const vaultPromise = WalletVault.open({
@@ -81,6 +93,10 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
     return vault;
   });
 
+  // macOS Keychain for the vault passphrase and PIN pepper (when available).
+  const keychain = createSecretStore(config.secretStore, config.vaultPath);
+  if (keychain !== undefined) logger.info('wallet secrets: macOS Keychain');
+
   // Create the service once the vault is ready.
   const servicePromise = vaultPromise.then(
     (vault) =>
@@ -90,10 +106,16 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
         passphraseMode: config.passphraseMode,
         env: process.env as Record<string, string | undefined>,
         credentials: ctx.get('credentials') as
-          | { resolve(ref: string): Promise<{ value?: string } | undefined>; set(ref: string, value: string): Promise<void> }
+          | {
+              resolve(ref: string): Promise<{ value?: string; source?: string } | undefined>;
+              set(ref: string, value: string): Promise<void>;
+              unset?(ref: string): Promise<void>;
+            }
           | undefined,
+        ...(keychain !== undefined ? { keychain } : {}),
         rpcOverrides: config.rpcOverrides,
         tokens: config.tokens,
+        allowModelSecretReveal: config.allowModelSecretReveal,
       }),
   );
 
@@ -125,7 +147,7 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
 
     if (toolsRuntime !== undefined) {
       servicePromise.then((service) => {
-        const tools = buildTools({ service, approval: resolveApproval(ctx) });
+        const tools = buildTools({ service, approval: resolveApproval(ctx), allowModelSecretReveal: config.allowModelSecretReveal });
         for (const tool of tools) {
           const dispose = toolsRuntime.register(tool as never);
           disposers.push(dispose);
@@ -147,7 +169,7 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
 
       if (modelTools !== undefined) {
         servicePromise.then((service) => {
-          const tools = buildTools({ service, approval: resolveApproval(ctx) });
+          const tools = buildTools({ service, approval: resolveApproval(ctx), allowModelSecretReveal: config.allowModelSecretReveal });
           for (const tool of tools) {
             const dispose = modelTools.register(tool);
             disposers.push(dispose);

@@ -23,6 +23,10 @@ interface SpendEvent {
   to?: string;
   valueWei: string;
   txHash?: string;
+  /** Token contract when the operation moved a fungible token. */
+  token?: string;
+  /** Token amount in atomic units (decimal string). */
+  tokenAmount?: string;
 }
 
 interface SpendState {
@@ -68,7 +72,40 @@ export class SpendTracker {
     return total;
   }
 
-  /** Record one signed transaction. */
+  /** Rolling-24h amount of one token signed away by one signer (atomic units). */
+  tokenSpentLast24h(from: string, token: string, now = Date.now()): bigint {
+    const floor = now - WINDOW_MS;
+    const lowerFrom = from.trim().toLowerCase();
+    const lowerToken = token.trim().toLowerCase();
+    let total = 0n;
+    for (const event of this.state.events) {
+      if (event.ts < floor || event.from.toLowerCase() !== lowerFrom) continue;
+      if (event.token?.toLowerCase() !== lowerToken || event.tokenAmount === undefined) continue;
+      total += BigInt(event.tokenAmount);
+    }
+    return total;
+  }
+
+  /** Every signer's operations inside the rolling 24h window (wallet-wide limits). */
+  windowEvents(now = Date.now()): Array<{ ts: number; chainId: number; valueWei: string; token?: string; tokenAmount?: string }> {
+    const floor = now - WINDOW_MS;
+    return this.state.events
+      .filter((event) => event.ts >= floor)
+      .map((event) => ({
+        ts: event.ts,
+        chainId: event.chainId,
+        valueWei: event.valueWei,
+        ...(event.token !== undefined ? { token: event.token } : {}),
+        ...(event.tokenAmount !== undefined ? { tokenAmount: event.tokenAmount } : {}),
+      }));
+  }
+
+  /** Secret-free view of the signed-operation history (for policy gates). */
+  events(): Array<{ ts: number; from: string; to?: string }> {
+    return this.state.events.map((event) => ({ ts: event.ts, from: event.from, to: event.to }));
+  }
+
+  /** Record one signed operation (transaction, or a typed-data payment authorization). */
   async record(event: Omit<SpendEvent, 'ts'> & { ts?: number }): Promise<void> {
     this.state.events.push({ ts: event.ts ?? Date.now(), ...event, from: event.from });
     await this.persist();

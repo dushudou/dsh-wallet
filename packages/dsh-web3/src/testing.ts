@@ -1,4 +1,3 @@
-import { describe, expect, it } from 'vitest';
 import type { ChainProvider, FeeData, TxReceipt } from 'dsh-web3-core';
 
 /** In-memory ChainProvider for plugin tests: no network, canned values. */
@@ -6,8 +5,20 @@ export class MockChainProvider implements ChainProvider {
   readonly chainId: number;
   balances = new Map<string, bigint>();
   nonces = new Map<string, number>();
+  /** Contract code by lower-cased address (default: EOA, `0x`). */
+  codes = new Map<string, string>();
+  /** `eth_call` results keyed by `${to.toLowerCase()}:${data}`. */
+  calls = new Map<string, string>();
+  /** ENS name -> address. */
+  names = new Map<string, string>();
+  /** Receipts by lower-cased hash. */
+  receipts = new Map<string, TxReceipt>();
   feeData: FeeData = { maxFeePerGas: 2_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n };
   gasEstimate = 21_000n;
+  /** When set, estimateGas rejects with this error (simulates a revert). */
+  estimateError: Error | undefined;
+  /** When set, the next broadcast rejects with this error. */
+  broadcastError: Error | undefined;
   broadcasted: string[] = [];
 
   constructor(chainId = 31337) {
@@ -26,15 +37,16 @@ export class MockChainProvider implements ChainProvider {
     return this.nonces.get(address.toLowerCase()) ?? 0;
   }
 
-  async getCode(): Promise<string> {
-    return '0x';
+  async getCode(address: string): Promise<string> {
+    return this.codes.get(address.toLowerCase()) ?? '0x';
   }
 
-  async call(): Promise<string> {
-    return '0x';
+  async call(transaction: { to: string; data: string }): Promise<string> {
+    return this.calls.get(`${transaction.to.toLowerCase()}:${transaction.data}`) ?? '0x';
   }
 
   async estimateGas(): Promise<bigint> {
+    if (this.estimateError !== undefined) throw this.estimateError;
     return this.gasEstimate;
   }
 
@@ -42,14 +54,23 @@ export class MockChainProvider implements ChainProvider {
     return this.feeData;
   }
 
-  async broadcastRawTransaction(rawTransaction: string): Promise<string> {
-    this.broadcasted.push(rawTransaction);
-    const seed = rawTransaction.slice(2, 66).padEnd(64, '0');
-    return `0x${seed}`;
+  async resolveName(name: string): Promise<string | null> {
+    return this.names.get(name.toLowerCase()) ?? null;
   }
 
-  async getTransactionReceipt(): Promise<TxReceipt | null> {
-    return null;
+  async broadcastRawTransaction(rawTransaction: string): Promise<string> {
+    if (this.broadcastError !== undefined) {
+      const error = this.broadcastError;
+      this.broadcastError = undefined;
+      throw error;
+    }
+    this.broadcasted.push(rawTransaction);
+    const { Transaction } = await import('ethers');
+    return Transaction.from(rawTransaction).hash!;
+  }
+
+  async getTransactionReceipt(hash: string): Promise<TxReceipt | null> {
+    return this.receipts.get(hash.toLowerCase()) ?? null;
   }
 
   async waitForTransaction(): Promise<TxReceipt> {

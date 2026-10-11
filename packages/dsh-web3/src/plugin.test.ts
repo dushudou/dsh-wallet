@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Transaction, getAddress } from 'ethers';
+import { Transaction, getAddress, verifyTypedData } from 'ethers';
 import { WalletVault, policyPreset } from 'dsh-web3-core';
 import { applyWalletPlugin } from '../src/index.js';
 import { WalletService } from '../src/service.js';
@@ -10,6 +10,7 @@ import { buildTools } from '../src/tools.js';
 import { buildRoutes } from '../src/http.js';
 import { Web3Remote } from '../src/remote.js';
 import { resolvePassphrase, passphraseFromFile, WALLET_PASSPHRASE_REF } from '../src/passphrase.js';
+import type { SecretStore } from '../src/keychain.js';
 import { MockChainProvider, ApprovalStub } from '../src/testing.js';
 
 const HARDHAT_MNEMONIC = 'test test test test test test test test test test test junk';
@@ -47,7 +48,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  service?.lock();
+  // Synchronous lock: service.lock() persists PIN state asynchronously and
+  // would race with the directory removal (ENOTEMPTY flakes).
+  service?.vault.lock();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -111,7 +114,8 @@ describe('wallet service: send transaction under policy', () => {
     );
     expect(result.status).toBe('signed-broadcast');
     expect(approval.requests).toHaveLength(1);
-    expect(approval.requests[0]!.reason).toContain('Approve transaction');
+    expect(approval.requests[0]!.reason).toContain('Send 0.000000000000001 ETH');
+    expect(approval.requests[0]!.reason).toContain(RECIPIENT); // full address, never truncated
     expect(provider.broadcasted).toHaveLength(1);
   });
 
@@ -187,6 +191,102 @@ describe('wallet service: message signing under policy', () => {
     expect(result.status).toBe('signed');
     expect(result.signature).toMatch(/^0x[0-9a-f]{130}$/i);
   });
+
+  it('authorizes an x402 payment (EIP-3009 TransferWithAuthorization)', async () => {
+    const accountId = await importHardhatAccount();
+    approval.outcome = 'allowed-once';
+    const challenge = {
+      x402Version: 2,
+      accepts: [
+        { scheme: 'exact', network: 'eip155:8453', maxAmountRequired: '1000000', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', payTo: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' },
+      ],
+    };
+    const result = await service.authorizeX402({ account: accountId, challenge, ttlSeconds: 300 }, approval);
+    if (result.status !== 'signed') throw new Error('expected signed, got ' + result.status);
+    expect(result.status).toBe('signed');
+    expect(result.signature).toMatch(/^0x[0-9a-f]{130}$/i);
+    expect(result.chainId).toBe(8453);
+    expect(result.asset).toBe('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913');
+    expect(result.payTo).toBe('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+    expect(result.amount).toBe('1000000');
+    expect(result.authorization.value).toBe('1000000');
+    expect(result.authorization.nonce).toMatch(/^0x[0-9a-f]{64}$/);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    expect(result.authorization.validBefore - nowSeconds).toBeGreaterThanOrEqual(299);
+    expect(result.authorization.validBefore - nowSeconds).toBeLessThanOrEqual(300);
+    expect(result.authorization.validAfter).toBeLessThan(nowSeconds); // tolerates facilitator clock skew
+    expect(result.expiresAt).toBeGreaterThan(Date.now());
+    // Base mainnet USDC's EIP-712 domain is "USD Coin" v2 — signing with "USDC" would be rejected on-chain.
+    const recovered = verifyTypedData(
+      { name: 'USD Coin', version: '2', chainId: 8453, verifyingContract: result.asset },
+      {
+        TransferWithAuthorization: [
+          { name: 'from', type: 'address' },
+          { name: 'to', type: 'address' },
+          { name: 'value', type: 'uint256' },
+          { name: 'validAfter', type: 'uint256' },
+          { name: 'validBefore', type: 'uint256' },
+          { name: 'nonce', type: 'bytes32' },
+        ],
+      },
+      result.authorization,
+      result.signature,
+    );
+    expect(recovered).toBe(HARDHAT_ACCOUNT_0);
+    expect(result.amountFormatted).toBe('1 USDC');
+  });
+
+  it('uses the EIP-712 domain declared in the x402 challenge (extra.name/version)', async () => {
+    const accountId = await importHardhatAccount();
+    approval.outcome = 'allowed-once';
+    const challenge = {
+      x402Version: 2,
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'eip155:84532',
+          amount: '10000',
+          asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+          payTo: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+          maxTimeoutSeconds: 120,
+          extra: { name: 'USDC', version: '2' },
+        },
+      ],
+    };
+    const result = await service.authorizeX402({ account: accountId, challenge, ttlSeconds: 900 }, approval);
+    if (result.status !== 'signed') throw new Error('expected signed, got ' + result.status);
+    expect(result.authorization.validBefore - Math.floor(Date.now() / 1000)).toBeLessThanOrEqual(120); // capped by maxTimeoutSeconds
+    const recovered = verifyTypedData(
+      { name: 'USDC', version: '2', chainId: 84532, verifyingContract: result.asset },
+      {
+        TransferWithAuthorization: [
+          { name: 'from', type: 'address' },
+          { name: 'to', type: 'address' },
+          { name: 'value', type: 'uint256' },
+          { name: 'validAfter', type: 'uint256' },
+          { name: 'validBefore', type: 'uint256' },
+          { name: 'nonce', type: 'bytes32' },
+        ],
+      },
+      result.authorization,
+      result.signature,
+    );
+    expect(recovered).toBe(HARDHAT_ACCOUNT_0);
+  });
+
+  it('rejects an x402 amount above maxAmountRequired', async () => {
+    const accountId = await importHardhatAccount();
+    approval.outcome = 'allowed-once';
+    const challenge = { payTo: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', maxAmountRequired: '1000000', network: 'base' };
+    await expect(service.authorizeX402({ account: accountId, challenge, amount: '2000000' }, approval)).rejects.toThrow('exceeds maxAmountRequired');
+  });
+
+  it('rejects an unsupported x402 network', async () => {
+    const accountId = await importHardhatAccount();
+    approval.outcome = 'allowed-once';
+    const challenge = { payTo: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', maxAmountRequired: '1', network: 'weirdnet' };
+    await expect(service.authorizeX402({ account: accountId, challenge }, approval)).rejects.toThrow('unsupported x402 network');
+  });
 });
 
 describe('wallet service: policy management', () => {
@@ -257,8 +357,19 @@ describe('model tools', () => {
     expect(JSON.parse(blocks[0]!.text)).toMatchObject({ unlocked: expect.any(Boolean) });
   });
 
-  it('wallet_create hides the mnemonic unless reveal is approved', async () => {
+  it('wallet_create never returns the mnemonic by default (backup happens in the panel)', async () => {
     const tools = buildTools({ service, approval });
+    const create = tools.find((tool) => tool.name === 'wallet_create')!;
+    approval.outcome = 'allowed-once';
+    const result = (await create.execute({ label: 'a', reveal: true }, {} as never)) as Record<string, unknown>;
+    expect(result.mnemonic).toBeUndefined();
+    expect(result.mnemonicRevealed).toBe(false);
+    expect(result.status).toBe('use-panel');
+    expect(approval.requests).toHaveLength(0);
+  });
+
+  it('wallet_create hides the mnemonic unless reveal is approved (unsafe opt-in)', async () => {
+    const tools = buildTools({ service, approval, allowModelSecretReveal: true });
     const create = tools.find((tool) => tool.name === 'wallet_create')!;
 
     // Without reveal: no mnemonic in result.
@@ -313,9 +424,20 @@ describe('model tools', () => {
     expect(service.getPolicy().defaultEffect).toBe('deny');
   });
 
-  it('wallet_reveal_secret requires approval', async () => {
+  it('wallet_reveal_secret never returns key material by default', async () => {
     const accountId = await importHardhatAccount();
     const tools = buildTools({ service, approval });
+    const reveal = tools.find((tool) => tool.name === 'wallet_reveal_secret')!;
+    approval.outcome = 'allowed-once';
+    const result = (await reveal.execute({ account: accountId, kind: 'privateKey' }, {} as never)) as Record<string, unknown>;
+    expect(result.value).toBeUndefined();
+    expect(result.status).toBe('use-panel');
+    expect(JSON.stringify(result)).not.toContain('ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80');
+  });
+
+  it('wallet_reveal_secret requires approval (unsafe opt-in)', async () => {
+    const accountId = await importHardhatAccount();
+    const tools = buildTools({ service, approval, allowModelSecretReveal: true });
     const reveal = tools.find((tool) => tool.name === 'wallet_reveal_secret')!;
 
     approval.outcome = 'rejected';
@@ -500,6 +622,99 @@ describe('passphrase resolution', () => {
 
   it('fails closed in manual mode with no source', async () => {
     await expect(resolvePassphrase('manual', {}, undefined)).rejects.toThrow(/no vault passphrase/);
+  });
+
+  /** In-memory stand-in for the macOS Keychain. */
+  function memoryKeychain(initial: Record<string, string> = {}): SecretStore & { items: Map<string, string> } {
+    const items = new Map(Object.entries(initial));
+    return {
+      kind: 'keychain',
+      items,
+      get: async (name) => items.get(name),
+      set: async (name, value) => {
+        items.set(name, value);
+      },
+      delete: async (name) => {
+        items.delete(name);
+      },
+    };
+  }
+
+  it('prefers the keychain over the credentials store', async () => {
+    const keychain = memoryKeychain({ [WALLET_PASSPHRASE_REF]: 'from-keychain' });
+    const credentials = { resolve: async () => ({ value: 'from-creds', source: 'file' }), set: async () => undefined };
+    const resolved = await resolvePassphrase('auto', {}, credentials, { keychain });
+    expect(resolved).toEqual({ passphrase: 'from-keychain', source: 'keychain' });
+  });
+
+  it('moves a passphrase out of the plaintext credentials file into the keychain', async () => {
+    const keychain = memoryKeychain();
+    const unset: string[] = [];
+    const credentials = {
+      resolve: async () => ({ value: 'from-file', source: 'file' }),
+      set: async () => undefined,
+      unset: async (ref: string) => {
+        unset.push(ref);
+      },
+    };
+    const resolved = await resolvePassphrase('auto', {}, credentials, { keychain });
+    expect(resolved).toEqual({ passphrase: 'from-file', source: 'keychain', migrated: true });
+    expect(keychain.items.get(WALLET_PASSPHRASE_REF)).toBe('from-file');
+    expect(unset).toEqual([WALLET_PASSPHRASE_REF]);
+  });
+
+  it('keeps the plaintext copy when the keychain write fails', async () => {
+    const keychain = memoryKeychain();
+    keychain.set = async () => {
+      throw new Error('keychain write did not persist');
+    };
+    const unset: string[] = [];
+    const credentials = {
+      resolve: async () => ({ value: 'from-file', source: 'file' }),
+      set: async () => undefined,
+      unset: async (ref: string) => {
+        unset.push(ref);
+      },
+    };
+    await expect(resolvePassphrase('auto', {}, credentials, { keychain })).rejects.toThrow(/did not persist/);
+    expect(unset).toEqual([]);
+  });
+
+  it('does not migrate read-only sources such as .env files', async () => {
+    const keychain = memoryKeychain();
+    const credentials = { resolve: async () => ({ value: 'from-dotenv', source: 'project-env' }), set: async () => undefined };
+    const resolved = await resolvePassphrase('auto', {}, credentials, { keychain });
+    expect(resolved).toEqual({ passphrase: 'from-dotenv', source: 'credentials' });
+    expect(keychain.items.size).toBe(0);
+  });
+
+  it('stores a generated passphrase in the keychain, not the credentials file', async () => {
+    const keychain = memoryKeychain();
+    let stored: string | undefined;
+    const credentials = {
+      resolve: async () => undefined,
+      set: async (_ref: string, value: string) => {
+        stored = value;
+      },
+    };
+    const resolved = await resolvePassphrase('auto', {}, credentials, { keychain });
+    expect(resolved.source).toBe('generated');
+    expect(keychain.items.get(WALLET_PASSPHRASE_REF)).toBe(resolved.passphrase);
+    expect(stored).toBeUndefined();
+  });
+
+  it('refuses to generate a passphrase once the vault holds accounts', async () => {
+    const keychain = memoryKeychain();
+    await expect(resolvePassphrase('auto', {}, undefined, { keychain, allowGenerate: false })).rejects.toThrow(/already holds accounts/);
+    expect(keychain.items.size).toBe(0);
+  });
+
+  it('propagates a keychain read error instead of generating', async () => {
+    const keychain = memoryKeychain();
+    keychain.get = async () => {
+      throw new Error('keychain read failed (exit 51)');
+    };
+    await expect(resolvePassphrase('auto', {}, undefined, { keychain })).rejects.toThrow(/keychain read failed/);
   });
 
   it('reads a passphrase file once and deletes it', async () => {

@@ -1,5 +1,5 @@
 {
-  "name": "dsh-wallet-repo",
+  "name": "dsh-web3-repo",
   "private": true,
   "version": "0.1.0",
   "description": "Agent-safe EVM wallet for the DeepSeek Harness (DSH): encrypted local key vault, declarative signing policy, model tools, and web UI.",
@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dushudou/dsh-wallet.git"
+    "url": "git+https://github.com/dushudou/dsh-web3.git"
   },
   "engines": {
     "node": ">=20"

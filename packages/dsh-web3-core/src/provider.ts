@@ -8,7 +8,7 @@
  * @module dsh-web3-core/provider
  */
 
-import { FetchRequest, JsonRpcProvider, Network, formatEther, type Provider, type TransactionLike } from 'ethers';
+import { FetchRequest, JsonRpcProvider, Network, formatEther, formatUnits, type Provider } from 'ethers';
 import { getChain, type ChainInfo } from './chains.js';
 
 /** EIP-1559 / legacy fee information. */
@@ -40,6 +40,8 @@ export interface ChainProvider {
   broadcastRawTransaction(rawTransaction: string): Promise<string>;
   getTransactionReceipt(hash: string): Promise<TxReceipt | null>;
   waitForTransaction(hash: string, timeoutMs?: number): Promise<TxReceipt>;
+  /** Resolve an ENS name to an address (mainnet providers); null when unset. */
+  resolveName?(name: string): Promise<string | null>;
   /** Underlying ethers provider, when one exists (exposed for advanced use). */
   readonly ethersProvider?: Provider;
 }
@@ -124,6 +126,10 @@ export class JsonRpcChainProvider implements ChainProvider {
 
   async getBalance(address: string): Promise<bigint> {
     return await this.ethersProvider.getBalance(address);
+  }
+
+  async resolveName(name: string): Promise<string | null> {
+    return await this.ethersProvider.resolveName(name);
   }
 
   async getNonce(address: string): Promise<number> {
@@ -255,8 +261,8 @@ export async function tokenBalance(
       decimals = undefined;
     }
   }
-  const formatted =
-    decimals !== undefined && decimals <= 36 ? (Number(balance) / 10 ** decimals).toFixed(6) : undefined;
+  // formatUnits keeps full precision (Number() loses it above 2^53 atomic units).
+  const formatted = decimals !== undefined && decimals <= 36 ? formatUnits(balance, decimals) : undefined;
   return { address: token.address, balance, ...(symbol !== undefined ? { symbol } : {}), ...(decimals !== undefined ? { decimals } : {}), ...(formatted !== undefined ? { formatted } : {}) };
 }
 

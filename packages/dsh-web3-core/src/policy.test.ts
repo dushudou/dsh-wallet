@@ -123,12 +123,30 @@ describe('policy evaluation', () => {
       updatedAt: new Date().toISOString(),
       defaultEffect: 'ask',
       rules: [
-        { id: 'erc20', effect: 'allow', priority: 10, match: { selectors: [transferSelector] } },
+        {
+          id: 'erc20',
+          effect: 'allow',
+          priority: 10,
+          match: { selectors: [transferSelector], intents: ['token-transfer'], tokenLimits: [{ token: '*' }] },
+        },
       ],
     };
     const data = `${transferSelector}${'00'.repeat(64)}`;
     expect(evaluatePolicy(policy, txRequest({ data, to: '0x000000000000000000000000000000000000dead' })).effect).toBe('allow');
     expect(evaluatePolicy(policy, txRequest({ data: '0xdeadbeef' })).effect).toBe('ask');
+  });
+
+  it('never lets a selector-only allow rule auto-sign token moves', () => {
+    const policy: SigningPolicy = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      defaultEffect: 'ask',
+      rules: [{ id: 'erc20', effect: 'allow', priority: 10, match: { selectors: ['0xa9059cbb'] } }],
+    };
+    const data = `0xa9059cbb${'00'.repeat(64)}`;
+    const decision = evaluatePolicy(policy, txRequest({ data, to: '0x000000000000000000000000000000000000dead' }));
+    expect(decision.effect).toBe('ask');
+    expect(decision.guardrail).toBe('intent-not-covered');
   });
 
   it('separates message and typed-data operations', () => {
@@ -228,5 +246,99 @@ describe('presets', () => {
     expect(evaluatePolicy(policy, txRequest({ chainId: 1 })).effect).toBe('ask');
     const overCap = evaluatePolicy(policy, txRequest({ chainId: 11155111, value: '2000000000000000000' }));
     expect(overCap.effect).not.toBe('allow');
+  });
+});
+
+describe('Phase-1 policy gates', () => {
+  const from = ACCOUNT.address;
+  const toA = '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  const toB = '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+  const toC = '0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+
+  it('allow rule downgrades to ask once the rolling-24h op-count cap is exceeded', () => {
+    const policy: SigningPolicy = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      defaultEffect: 'deny',
+      rules: [{ id: 'count', effect: 'allow', priority: 10, match: { maxCountPerDay: 2 } }],
+    };
+    const events = [
+      { ts: Date.now() - 60_000, from, to: toA },
+      { ts: Date.now() - 30_000, from, to: toB },
+    ];
+    // Third tx within 24h exceeds the cap -> allow downgraded to ask.
+    const decision = evaluatePolicy(policy, txRequest({ from, to: toC, value: '1' }), 0n, { events, now: Date.now() });
+    expect(decision.ruleId).toBe('count');
+    expect(decision.effect).toBe('ask');
+    expect(decision.withinDailyCap).toBe(false);
+    // Under the cap -> allow.
+    const ok = evaluatePolicy(policy, txRequest({ from, to: toC, value: '1' }), 0n, { events: events.slice(0, 1), now: Date.now() });
+    expect(ok.effect).toBe('allow');
+    expect(ok.withinDailyCap).toBe(true);
+  });
+
+  it('enforces a per-recipient cooldown by downgrading allow to ask', () => {
+    const policy: SigningPolicy = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      defaultEffect: 'deny',
+      rules: [{ id: 'cooldown', effect: 'allow', priority: 10, match: { cooldownSeconds: 300 } }],
+    };
+    const recent = [{ ts: Date.now() - 10_000, from, to: toA }];
+    const decision = evaluatePolicy(policy, txRequest({ from, to: toA }), 0n, { events: recent, now: Date.now() });
+    expect(decision.effect).toBe('ask');
+    expect(decision.withinDailyCap).toBe(false);
+    // After cooldown has elapsed -> allow.
+    const cooled = evaluatePolicy(policy, txRequest({ from, to: toA }), 0n, { events: recent, now: Date.now() + 301_000 });
+    expect(cooled.effect).toBe('allow');
+  });
+
+  it('restricts operations to an asset allowlist', () => {
+    const policy: SigningPolicy = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      defaultEffect: 'ask',
+      rules: [{ id: 'stablecoins', effect: 'allow', priority: 10, match: { allowedAssets: [toA] } }],
+    };
+    expect(evaluatePolicy(policy, txRequest({ to: toA })).effect).toBe('allow');
+    expect(evaluatePolicy(policy, txRequest({ to: toB })).effect).toBe('ask');
+  });
+
+  it('forces approval for first-seen recipients while allowing known ones', () => {
+    const policy: SigningPolicy = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      defaultEffect: 'deny',
+      rules: [{ id: 'first', effect: 'allow', priority: 10, match: { firstSeenAsk: true } }],
+    };
+    const seen = [{ ts: Date.now() - 60_000, from, to: toA }];
+    // toA was seen before -> allow.
+    const known = evaluatePolicy(policy, txRequest({ from, to: toA }), 0n, { events: seen, now: Date.now() });
+    expect(known.effect).toBe('allow');
+    // toB is new -> forced ask even though the rule is allow.
+    const fresh = evaluatePolicy(policy, txRequest({ from, to: toB }), 0n, { events: seen, now: Date.now() });
+    expect(fresh.effect).toBe('ask');
+    expect(fresh.reason).toContain('not seen before');
+  });
+
+  it('validates the new Phase-1 fields', () => {
+    const good: SigningPolicy = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      defaultEffect: 'ask',
+      rules: [
+        {
+          id: 'r1',
+          effect: 'allow',
+          match: { maxCountPerDay: 10, cooldownSeconds: 60, allowedAssets: [toA], firstSeenAsk: true },
+        },
+      ],
+    };
+    expect(validatePolicy(good)).toEqual([]);
+    const bad = { ...good, rules: [{ ...good.rules[0], match: { maxCountPerDay: -1, cooldownSeconds: 1.5, firstSeenAsk: 'yes' } }] };
+    const errors = validatePolicy(bad as unknown as SigningPolicy);
+    expect(errors.some((error) => error.includes('maxCountPerDay'))).toBe(true);
+    expect(errors.some((error) => error.includes('cooldownSeconds'))).toBe(true);
+    expect(errors.some((error) => error.includes('firstSeenAsk'))).toBe(true);
   });
 });

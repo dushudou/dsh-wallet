@@ -43,10 +43,22 @@ export const PluginConfig = z
         tokens: z.dict(z.array(z.object({ address: z.string(), symbol: z.string() }).loose())),
       })
       .loose(),
+    /**
+     * Where the vault passphrase and PIN pepper live. `auto` (default): the
+     * macOS Keychain on macOS, otherwise none (credentials store only).
+     * The `DSH_WEB3_SECRET_STORE` environment variable overrides `auto`.
+     */
+    secretStore: z.union(['auto', 'keychain', 'none']).default('auto'),
     /** Disable the built-in wallet tools (service-only mode). */
     disableTools: z.boolean().default(false),
     /** Disable the read-only HTTP endpoints for the web UI. */
     disableHttp: z.boolean().default(false),
+    /**
+     * UNSAFE: allow model tools to return mnemonics / private keys into the
+     * chat transcript (after human approval). Off by default — the
+     * transcript is sent to the model provider and stored in session logs.
+     */
+    unsafeAllowModelSecretReveal: z.boolean().default(false),
   })
   .loose();
 
@@ -54,10 +66,12 @@ export type PluginConfigValue = {
   vaultPath?: string;
   autoLockMs?: number;
   passphrase?: { mode?: 'auto' | 'env' | 'manual' };
+  secretStore?: 'auto' | 'keychain' | 'none';
   chains?: {
     rpc?: Record<string, string>;
     tokens?: Record<string, Array<{ address: string; symbol?: string }>>;
   };
   disableTools?: boolean;
   disableHttp?: boolean;
+  unsafeAllowModelSecretReveal?: boolean;
 };

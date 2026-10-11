@@ -27,7 +27,7 @@ importers:
         specifier: ^3.18.1
         version: 3.18.1
       dsh-web3-core:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../dsh-web3-core
       ethers:
         specifier: ^6.13.0

@@ -51,6 +51,11 @@ export interface PopulatedTransaction {
   maxFeePerGas?: bigint;
   maxPriorityFeePerGas?: bigint;
   gasPrice?: bigint;
+  /**
+   * Set when gas estimation failed (typically: the call would revert) and a
+   * fallback gas limit was used. Callers should refuse or warn before signing.
+   */
+  estimateError?: string;
 }
 
 /** Human-readable view of a transaction for approvals, logs, and the UI. */
@@ -95,15 +100,19 @@ export async function populateTransaction(
   ]);
 
   let gasLimit: bigint;
+  let estimateError: string | undefined;
   if (request.gasLimit !== undefined) {
     gasLimit = request.gasLimit;
   } else {
     try {
       const estimated = await provider.estimateGas({ to, ...(value > 0n ? { value } : {}), ...(data !== '0x' ? { data } : {}), from: request.from });
       gasLimit = estimated + GAS_LIMIT_BUFFER;
-    } catch {
-      // Estimation failure (e.g. contract revert) still lets a plain transfer through.
+    } catch (error) {
+      // Estimation failure (e.g. contract revert): fall back, but report it so
+      // callers do not blindly sign a transaction that burns gas and reverts.
       gasLimit = data === '0x' ? GAS_LIMIT_DEFAULT : 200_000n;
+      const reason = (error as { shortMessage?: string; message?: string } | null)?.shortMessage ?? (error as Error | null)?.message;
+      estimateError = reason ?? 'gas estimation failed';
     }
   }
 
@@ -120,6 +129,7 @@ export async function populateTransaction(
       data,
       maxFeePerGas: request.maxFeePerGas ?? feeData.maxFeePerGas!,
       maxPriorityFeePerGas: request.maxPriorityFeePerGas ?? feeData.maxPriorityFeePerGas ?? feeData.maxFeePerGas! / 10n,
+      ...(estimateError !== undefined ? { estimateError } : {}),
     };
   }
   const gasPrice = request.gasPrice ?? feeData.gasPrice ?? feeData.maxFeePerGas;
@@ -134,6 +144,7 @@ export async function populateTransaction(
     value,
     data,
     gasPrice,
+    ...(estimateError !== undefined ? { estimateError } : {}),
   };
 }
 

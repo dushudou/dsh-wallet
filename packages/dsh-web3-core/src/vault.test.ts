@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Wallet } from 'ethers';
 import { WalletVault } from '../src/vault.js';
+import { detectPreset } from '../src/policy/presets.js';
 import { generateMnemonic } from '../src/account.js';
 import { looksLikePrivateKey, maskAddress, redactHexLike, redactRecord, assertNoSecrets } from '../src/redact.js';
 
@@ -25,12 +26,16 @@ afterEach(async () => {
 });
 
 describe('vault lifecycle', () => {
-  it('initializes an empty vault with a strict default policy', () => {
+  it('initializes an empty vault with the small-amount defaults', () => {
     const status = vault.status();
     expect(status.directory).toBe(dir);
     expect(status.unlocked).toBe(false);
     expect(status.accountCount).toBe(0);
     expect(status.policySummary.defaultEffect).toBe('ask');
+    expect(detectPreset(vault.getPolicy())).toBe('micropay');
+    const limits = vault.getLimits();
+    expect(limits.usd).toEqual({ perTx: '100', perDay: '1000' });
+    expect(limits.native.ETH).toEqual({ perTx: '1', perDay: '100' });
   });
 
   it('creates accounts that unlock and sign', async () => {

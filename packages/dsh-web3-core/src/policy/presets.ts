@@ -6,8 +6,37 @@
 
 import { randomUUID } from 'node:crypto';
 import type { PolicyRule, SigningPolicy } from './types.js';
+import type { IntentKind } from '../intent.js';
+import { knownTokens } from '../tokens.js';
 
-export type PolicyPresetId = 'locked' | 'strict' | 'testnet' | 'power';
+export type PolicyPresetId = 'locked' | 'strict' | 'testnet' | 'power' | 'micropay';
+
+/** Every transaction intent — used by rules meant to cover all tx shapes (dev chains, testnets). */
+const ALL_TX_INTENTS: IntentKind[] = [
+  'native-transfer',
+  'contract-call',
+  'token-transfer',
+  'token-approve',
+  'token-revoke',
+  'nft-transfer',
+  'nft-approval',
+];
+
+/** Every signature intent (messages + typed data). */
+const ALL_SIGNATURE_INTENTS: IntentKind[] = ['message', 'typed-data', 'permit', 'permit-transfer', 'transfer-authorization', 'order'];
+
+const TESTNET_CHAINS = [11155111, 80002, 84532, 421614, 11155420, 17000, 31337];
+
+/** Chains where the micropay preset lets USDC x402 payments sign autonomously. */
+const MICROPAY_CHAINS = [1, 10, 137, 8453, 42161, 11155111, 84532];
+
+function usdcLimits(maxPerTx: string, maxPerDay: string) {
+  return MICROPAY_CHAINS.flatMap((chainId) =>
+    knownTokens(chainId)
+      .filter((token) => token.symbol === 'USDC')
+      .map((token) => ({ token: token.address, symbol: `USDC@${String(chainId)}`, maxPerTx, maxPerDay })),
+  );
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -52,10 +81,10 @@ export function policyPreset(id: PolicyPresetId): SigningPolicy {
           }),
           rule({
             id: 'allow-localhost',
-            description: 'sign freely on local dev chains (anvil/hardhat)',
+            description: 'sign freely on local dev chains (anvil/hardhat), token moves included',
             priority: 500,
             effect: 'allow',
-            match: { type: 'signTransaction', chainIds: [31337] },
+            match: { type: 'signTransaction', chainIds: [31337], intents: ALL_TX_INTENTS, tokenLimits: [{ token: '*' }] },
           }),
         ],
       };
@@ -73,9 +102,11 @@ export function policyPreset(id: PolicyPresetId): SigningPolicy {
             effect: 'allow',
             match: {
               type: 'signTransaction',
-              chainIds: [11155111, 80002, 84532, 421614, 11155420, 17000, 31337],
+              chainIds: TESTNET_CHAINS,
               maxTxValue: '1000000000000000000',
               maxValuePerDay: '5000000000000000000',
+              intents: ALL_TX_INTENTS,
+              tokenLimits: [{ token: '*' }],
             },
           }),
           rule({
@@ -85,7 +116,9 @@ export function policyPreset(id: PolicyPresetId): SigningPolicy {
             effect: 'allow',
             match: {
               type: ['signMessage', 'signTypedData'],
-              chainIds: [11155111, 80002, 84532, 421614, 11155420, 17000, 31337],
+              chainIds: TESTNET_CHAINS,
+              intents: ALL_SIGNATURE_INTENTS,
+              tokenLimits: [{ token: '*' }],
             },
           }),
         ],
@@ -122,18 +155,45 @@ export function policyPreset(id: PolicyPresetId): SigningPolicy {
             priority: 600,
             effect: 'allow',
             match: {
-              chainIds: [11155111, 80002, 84532, 421614, 11155420, 17000, 31337],
+              chainIds: TESTNET_CHAINS,
               maxValuePerDay: '10000000000000000000',
+              intents: [...ALL_TX_INTENTS, ...ALL_SIGNATURE_INTENTS],
+              tokenLimits: [{ token: '*' }],
             },
           }),
         ],
       };
+    case 'micropay': {
+      // Strict, plus autonomous x402 micro-payments in USDC: at most 1 USDC per
+      // payment and 10 USDC per rolling day; the first payment to each new
+      // merchant still asks once.
+      const strict = policyPreset('strict');
+      return {
+        ...strict,
+        rules: [
+          ...strict.rules,
+          rule({
+            id: 'x402-usdc-micropayments',
+            description: 'auto-sign USDC payment authorizations (x402) up to 1 USDC each, 10 USDC per day; new merchants ask once',
+            priority: 600,
+            effect: 'allow',
+            match: {
+              type: 'signTypedData',
+              intents: ['transfer-authorization'],
+              chainIds: MICROPAY_CHAINS,
+              tokenLimits: usdcLimits('1000000', '10000000'),
+              firstSeenAsk: true,
+            },
+          }),
+        ],
+      };
+    }
   }
 }
 
 /** The preset id a policy document was generated from, when detectable. */
 export function detectPreset(policy: SigningPolicy): PolicyPresetId | undefined {
-  const presets: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power'];
+  const presets: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay'];
   for (const id of presets) {
     const preset = policyPreset(id);
     const a = JSON.stringify({ ...preset, updatedAt: 0, rules: preset.rules.map((r) => ({ ...r, id: 'x', description: r.description })) });

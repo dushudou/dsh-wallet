@@ -1,12 +1,29 @@
 {
   "name": "dsh-web3",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "DeepSeek Harness (DSH) plugin: agent-safe EVM wallet with encrypted vault, signing policy, model tools, bundled skill, and web UI.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "deepseek-harness",
+    "web3",
+    "wallet",
+    "evm",
+    "ethereum",
+    "x402",
+    "agent"
+  ],
+  "homepage": "https://github.com/dushudou/dsh-wallet/tree/main/packages/dsh-web3#readme",
+  "bugs": {
+    "url": "https://github.com/dushudou/dsh-wallet/issues"
+  },
+  "icon": "./icon.svg",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dushudou/dsh-web3.git",
+    "url": "git+https://github.com/dushudou/dsh-wallet.git",
     "directory": "packages/dsh-web3"
   },
   "main": "./lib/index.js",
@@ -21,7 +38,9 @@
       "default": "./client/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon.svg": "./icon.svg"
   },
   "dsh": {
     "client": {
@@ -35,9 +54,13 @@
   "files": [
     "lib",
     "client",
+    "skills",
+    "locale/*.json",
+    "icon.svg",
     "cordis.patch.yml",
     "README.md",
-    "skills"
+    "README.zh.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -65,5 +88,8 @@
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

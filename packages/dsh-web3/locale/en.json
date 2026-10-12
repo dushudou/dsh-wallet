@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Web3 wallet",
+    "description": "Agent-safe EVM wallet: encrypted local keys, signing policy and spending limits, pre-signing security checks, and x402 payments."
+  }
+}

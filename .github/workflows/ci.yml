@@ -2,39 +2,44 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20.x, 22.x]
+        node-version: [20.x, 22.x, 24.x]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
+      # Version comes from `packageManager` in package.json.
+      - uses: pnpm/action-setup@v4
 
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: pnpm run typecheck
+      - run: pnpm run test
 
-      - name: Build
-        run: pnpm run build
-
-      - name: Type check
-        run: pnpm run typecheck
-
-      - name: Test
-        run: pnpm run test
+      - name: Check the published tarballs
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          pnpm --filter dsh-web3-core --filter dsh-web3 pack --pack-destination "$RUNNER_TEMP/pack"
+          plugin=$(ls "$RUNNER_TEMP"/pack/dsh-web3-[0-9]*.tgz)
+          for file in package/cordis.patch.yml package/icon.svg package/locale/en.json package/locale/zh.json \
+                      package/skills/dsh-web3-wallet/SKILL.md package/client/client.js package/lib/index.js \
+                      package/README.md package/README.zh.md package/LICENSE; do
+            tar -tzf "$plugin" | grep -qx "$file" || { echo "missing $file in $plugin"; exit 1; }
+          done
+          tar -xzOf "$plugin" package/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s);const r=p.dependencies["dsh-web3-core"];if(r.startsWith("workspace:")){console.error("unrewritten "+r);process.exit(1)}console.log("dsh-web3-core range",r)})'

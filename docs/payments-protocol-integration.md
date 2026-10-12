@@ -1,7 +1,6 @@
 # dsh-web3 无感安全交易 & 第三方支付协议集成设计
 
 > 迭代任务（每 30 分钟一轮），本文档为第 1 轮产出（2026-08-29）。
-> 迭代状态：`/Users/dushaobin/.agents/skills/loop-me/workflows/wallet-payments.md`
 
 ## 一、第三方协议调研结论
 

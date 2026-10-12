@@ -1,0 +1,33 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issue?** Do not file it here — report it privately: https://github.com/dushudou/dsh-wallet/security/advisories/new
+        Never paste recovery phrases, private keys, PINs, or keystore files.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Include tool results or error codes (redact addresses if you prefer).
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: dsh-web3, dsh-web3-core, DSH (`dsh --version`), Node.js, OS
+      placeholder: dsh-web3 0.8.0, dsh-web3-core 0.4.0, DSH 0.2.0-rc.2, Node 22, macOS 15
+    validations:
+      required: true
+  - type: input
+    id: chain
+    attributes:
+      label: Chain and RPC
+      placeholder: Base (8453), default RPC
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce

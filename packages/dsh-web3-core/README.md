@@ -56,6 +56,10 @@ vault/
 ├── vault.json           # account metadata (no secrets)
 ├── policy.json          # signing policy (no secrets)
 ├── spend-state.json     # rolling-24h spend tracker (no secrets)
+├── limits.json          # hard limits + transfer whitelist switch
+├── security.json        # pre-signing security check settings
+├── denylist.json        # user denylist
+├── denylist-feeds.json  # cached OFAC / ScamSniffer feeds
 ├── keys/
 │   └── <accountId>.json # AES-256-GCM encrypted key material (0600)
 └── audit/
@@ -126,6 +130,14 @@ const policy = {
 - `explorerUrl(chainId, kind, value): string | undefined`
 - `JsonRpcChainProvider` — production JSON-RPC provider
 - `accountBalances(provider, address, tokens?): Promise<{ native, tokens }>`
+
+### Security checks
+
+- `runSecurityChecks(checks, subject, { onUnavailable })` — run `RiskCheck`s in parallel with per-check time budgets
+- `escalateDecision(decision, report)` — `critical` → deny, `high` → ask; never loosens
+- `Denylist` / `DENYLIST_FEEDS` — user denylist plus cached public feeds (`refreshFeeds` keeps the old list on failure)
+- `summarizeSimulation(result, account)` / `reconcileSimulation(...)` — decode `eth_simulateV1` logs and compare them with the intent
+- `JsonRpcChainProvider.simulate(call)` — `eth_simulateV1` with `traceTransfers`; throws `SimulationUnsupportedError` when the RPC lacks it
 
 ### Crypto & redaction
 

@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dushudou/dsh-web3.git"
+    "url": "git+https://github.com/dushudou/dsh-wallet.git"
   },
   "engines": {
     "node": ">=20"
@@ -24,5 +24,6 @@
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
-  }
+  },
+  "packageManager": "pnpm@10.30.2"
 }

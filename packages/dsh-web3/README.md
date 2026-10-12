@@ -1,211 +1,235 @@
 # dsh-web3
 
-DeepSeek Harness (DSH) plugin that mounts an agent-safe EVM wallet. Exposes a programmatic service (`ctx.wallet`), model tools (`wallet_*`), and read-only HTTP endpoints for the web UI.
+English | [中文](README.zh.md)
 
-## Install
+[![npm](https://img.shields.io/npm/v/dsh-web3.svg)](https://www.npmjs.com/package/dsh-web3)
+[![CI](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml/badge.svg)](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/dsh-web3.svg)](LICENSE)
+
+An agent-safe EVM wallet for [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh), packaged as a DSH bundle.
+
+## Summary
+
+Let an agent check balances, send tokens, sign permits, and pay x402 invoices without ever holding a private key in the chat. Keys stay encrypted on your machine. Every operation passes a signing policy, hard spending limits, and pre-signing security checks (denylists, sanctions, transaction simulation) before anything is signed, and the risky ones wait for your approval. A **Web3 wallet** page in DSH Settings handles accounts, backups, PIN, limits, and the denylist.
+
+## Table of Contents
+
+- [Use this package](#use-this-package)
+- [Understand the implementation](#understand-the-implementation)
+- [Model Experience](#model-experience)
+- [Known Limitations](#known-limitations)
+- [Further Exploration](#further-exploration)
+
+-----
+
+## Use this package
+
+### Requirements
+
+- DSH `0.2.x` (the bundle declares a `@deepseek-ai/dsh-typert-protocol` peer range that DSH checks at install and startup)
+- Node.js 20 or newer
+- macOS for the Keychain-backed secret store (other platforms use the DSH credentials store)
+
+### Install
 
 ```bash
-pnpm add dsh-web3
+dsh plugin --profile web add dsh-web3
 ```
 
-## Configuration
+Or open the **Plugins** page in the DSH Web sidebar and install `dsh-web3`. The bundle's `cordis.patch.yml` mounts the plugin as the `web3` row; with HMR on (the default `web` profile) it is live immediately, otherwise restart DSH.
+
+Then open **Settings → Web3 wallet**: create or import a wallet, back up the recovery phrase, and set a PIN.
+
+### Configuration
+
+Override the `web3` row in your profile's `cordis.patch.yml`. Every field is optional:
 
 ```yaml
-# dsh composition config
-- id: wallet
-  name: 'dsh-web3'
+- id: web3
   config:
-    # Vault directory. Defaults to $DSH_HOME/wallet or ~/.dsh/wallet.
-    vaultPath: ~/.dsh/wallet
-    # Auto-lock after this many ms without use (default 900000 = 15 min).
-    autoLockMs: 900000
+    vaultPath: ~/.dsh-web3       # vault directory (default ~/.dsh-web3)
+    autoLockMs: 900000           # lock after 15 minutes idle
     passphrase:
-      # auto: use credentials store, generate on first use
-      # env:  read DSH_WALLET_PASSPHRASE from environment
-      # manual: never generate; user must supply env or credentials
-      mode: auto
-    # Where the passphrase and PIN pepper live: auto (macOS Keychain on
-    # macOS, else none), keychain, or none.
-    secretStore: auto
+      mode: auto                 # auto | env | manual
+    secretStore: auto            # auto (macOS Keychain on macOS) | keychain | none
     chains:
-      # Per-chain RPC overrides (chain id -> URL)
-      rpc:
-        1: https://eth.llamarpc.com
-        137: https://polygon-rpc.com
-      # Watch-only tokens for balance display (chain id -> token list)
-      tokens:
-        1:
-          - address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+      rpc:                       # per-chain RPC overrides
+        1: https://my-eth-rpc.example
+      tokens:                    # extra tokens to show balances for
+        8453:
+          - address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
             symbol: USDC
-    # Disable built-in model tools (service-only mode)
-    disableTools: false
-    # UNSAFE: let tools return mnemonics/private keys into the chat transcript
-    # after approval (the transcript goes to the model provider). Default false.
-    unsafeAllowModelSecretReveal: false
-    # Disable read-only HTTP endpoints
+    disableTools: false          # true = service only, no wallet_* tools
     disableHttp: false
+    unsafeAllowModelSecretReveal: false   # never turn on: secrets would enter the transcript
 ```
 
-## Passphrase resolution
-
-Passphrases **never** travel through tool arguments (which are session-logged). The resolution chain:
-
-1. `DSH_WALLET_PASSPHRASE` environment variable
-2. macOS Keychain (service `dsh-web3`), when `secretStore` resolves to the keychain
-3. Harness credentials service (`$DSH_HOME/.credentials.yaml`, `.env` layers) — a value found in the plaintext `.credentials.yaml` is moved into the Keychain on first use (written, read back, then removed from the file)
-4. In `auto` mode only, while the vault has no accounts: generate a strong random passphrase and store it in the Keychain (or credentials where no Keychain applies)
-
-The daily PIN is stored only as an scrypt hash; with the Keychain it is also keyed by a random pepper kept there, so a copied `pin.json` cannot be brute-forced offline.
-
-For manual workflows, the unlock tool accepts a `passphraseFile` path — the file is read once (must be 0600) and deleted immediately.
-
-## Service API (`ctx.wallet`)
-
-```ts
-const { wallet } = ctx;
-
-// Vault
-wallet.status();                    // vault status snapshot
-wallet.listAccounts();              // account metadata (no secrets)
-await wallet.unlock();              // unlock via passphrase resolution
-wallet.lock();                      // lock + zeroize
-
-// Accounts
-await wallet.createAccount({ label: 'Trading' });
-await wallet.importAccount({ source: 'mnemonic', secretFile: '/tmp/seed.txt' });
-await wallet.removeAccount(accountId);
-
-// Balances
-await wallet.balances(accountMeta, 1);  // native + configured tokens
-
-// Transactions (full policy + approval pipeline)
-await wallet.prepareTransaction({ from, chainId: 1, to, value });  // dry-run
-await wallet.sendTransaction({ from, chainId: 1, to, value }, approvalGateway);
-
-// Signing
-await wallet.signMessage({ account, message }, approvalGateway);
-await wallet.signTypedData({ account, domain, types, value }, approvalGateway);
-
-// Policy
-wallet.getPolicy();
-await wallet.setPolicy(policyPreset('testnet'));
-
-// Audit
-await wallet.recentAudit(50);
-```
-
-## Model tools
-
-When `disableTools` is false, the plugin registers these tools:
-
-| Tool | Description |
+| Environment variable | Effect |
 |---|---|
-| `wallet_status` | Vault status, account count, policy summary, daily-PIN state |
-| `wallet_unlock` / `wallet_lock` | Unlock (passphrase from resolution chain or `passphraseFile`) / lock |
-| `wallet_list` | List account metadata (no secrets) |
-| `wallet_create` | New HD wallet, or derive the next address from an existing seed (`fromAccount`) |
-| `wallet_import` | Import from a 0600 mnemonic / private key / keystore file |
-| `wallet_remove_account` | Remove an account (human approval + PIN; warns when not backed up) |
-| `wallet_chains` | Chain registry with the well-known token symbols per chain |
-| `wallet_balance` | Native + token balances (configured + well-known tokens, or an explicit list) |
-| `wallet_address_book` | List / add / remove contacts (writes need approval; whitelisted contacts are panel-only) |
-| `wallet_transfer` | Native or ERC-20 transfer in **human units** (`amount: "25"`, `token: "USDC"`); `dryRun` returns a `preparedId` |
-| `wallet_prepare_transaction` | Dry-run a raw call: populate, decode intent, preflight, policy — returns a `preparedId` |
-| `wallet_send_transaction` | Execute a `preparedId` (or raw fields): policy → PIN → approval → sign → journal → broadcast |
-| `wallet_approve_token` / `wallet_allowance` | Set / revoke / read ERC-20 allowances (unlimited always asks) |
-| `wallet_tx_status` / `wallet_history` | Receipt-backed status; locally journaled history |
-| `wallet_replace_transaction` | Speed up or cancel a pending transaction (same nonce) |
-| `wallet_sign_message` / `wallet_sign_typed_data` | EIP-191 / EIP-712 signing; permits and orders are decoded and gated |
-| `wallet_x402_authorize` | x402 `exact` payments (v1/v2) with the token's real EIP-712 domain |
-| `wallet_policy_get` | Policy, detected preset, hard limits (whitelist, USD / native caps) and today's usage |
-| `wallet_policy_set` | **Tighten only** (`locked` / `strict`); loosening returns `status: "use-panel"` |
-| `wallet_reveal_secret` | Points the user to the settings panel (key material never enters the transcript) |
-| `wallet_export_keystore` | Encrypted keystore to a 0600 file (approval + PIN); returns only the path |
-| `wallet_pin_status` / `wallet_pin_verify` | Human-gate status (no PIN argument) |
-| `wallet_audit_log` | Recent secret-free audit entries |
+| `DSH_WALLET_PASSPHRASE` | Vault passphrase (`env` mode, or first in the resolution chain) |
+| `DSH_WEB3_SECRET_STORE` | `keychain` / `none`; refines `secretStore: auto` |
+| `DSH_WEB3_DENYLIST_REFRESH` | `off` stops the daily OFAC / ScamSniffer downloads (offline machines) |
 
-Every failure is returned as `{ ok: false, code, message, hint }` (e.g. `VAULT_LOCKED`, `INVALID_ADDRESS`, `INSUFFICIENT_FUNDS`, `WOULD_REVERT`) so agents can recover deterministically. See `docs/wallet-design.md` for the full design.
-
-## HTTP endpoints
-
-When `disableHttp` is false, read-only endpoints are mounted for the web UI:
-
-- `GET /api/dsh-web3/status` — vault status
-- `GET /api/dsh-web3/accounts` — account list
-- `GET /api/dsh-web3/balances?chainId=1&address=0x...` — balances
-- `GET /api/dsh-web3/policy` — current policy
-- `GET /api/dsh-web3/audit?limit=50` — recent audit entries
-- `GET /api/dsh-web3/chains` — built-in chain registry
-
-All endpoints return secret-free JSON.
-
-## DSH web profile
-
-Add `dsh-web3` to the profile `package.json` and bundle list, then reinstall:
-
-```jsonc
-// ~/.dsh/profiles/web/package.json
-{
-  "dependencies": { "dsh-web3": "^0.7.0" },
-  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-freeroute", "dsh-web3"] } }
-}
-```
-
-The package's `cordis.patch.yml` (declared via `dsh.bundle.patch` in
-package.json) mounts the plugin as `web3` in the composed profile. On the
-DSH web host the plugin also registers a Typert Remote namespace (`web3/*`)
-that the settings panel uses over the client Connection RPC carrier.
-
-## Bundled skill
-
-The `dsh-web3-wallet` skill (`skills/dsh-web3-wallet/SKILL.md`) is served
-through the DSH skill registry (`ctx.skills.registerProvider`, DSH ≥ 0.2), so
-it is in every session's skill catalog while the plugin is loaded — nothing
-is written to `~/.dsh/skills`. Its catalog line routes any wallet, transfer,
-token, signing, x402 or wallet-policy request to the `wallet_*` tools ahead
-of shell scripts or other wallet skills.
-
-Older releases mirrored the file into `~/.dsh/skills/dsh-web3-wallet/`, where
-it would shadow the bundled copy. Mirrors whose content matches a shipped
-version are removed on startup; a copy you edited is kept (with a warning).
-Hosts without a skill registry still get a marked mirror.
-
-## Hard limits and the transfer whitelist
-
-On top of the signing policy, `limits.json` holds rules that refuse a request
-outright — even after a human clicks approve:
-
-- **Transfer whitelist** — direct transfers, token transfers, NFT transfers and
-  payment authorizations (x402) only to trusted contacts or your own accounts.
-- **Stablecoin caps** — per transfer / rolling 24h, in USD (USDC / USDT / DAI
-  at $1), summed across chains.
-- **Native caps** — per transfer / rolling 24h per native coin (`ETH` covers
-  every ETH-native chain); also applied to value sent with contract calls.
-
-A new wallet starts with the small-amount profile: the `micropay` policy,
-stablecoins capped at 100 USD per transfer / 1000 USD per day, and every native
-coin at 1 per transfer / 100 per day. Testnets are exempt unless
-`includeTestnets` is on. Model tools can read the limits but never change them.
-
-## Settings panel
-
-The client half (`dsh-web3/client`, DSH web module-loader format) adds a
-**Web3 wallet** page to DSH Settings, built from DSH primitives (segmented
-tabs, switches, modals, risk confirmations, menus) and DSH theme tokens:
+### Settings panel
 
 | Tab | What it does |
 |---|---|
-| Assets | Account / network picker, receiving address, balances, recent transactions, setup reminders |
-| Accounts | Create, import (phrase / key / keystore), back up, rename, export keystore (browser download), remove |
-| Security | Lock / unlock, PIN (set, verify, change, revoke today), agent-permission summary |
+| Assets | Account and network picker, receiving address, balances, recent transactions, setup reminders |
+| Accounts | Create, import (phrase / key / keystore), back up, rename, export keystore, remove |
+| Security | Lock / unlock, PIN, pre-signing checks and feed status, denylist, agent permissions |
 | Limits | Security mode (presets), spending caps with today's usage, transfer whitelist and contacts, policy rules |
 | Activity | Transaction history with explorer links, audit log |
 
-Anything that weakens protection or exposes keys — loosening a preset or a
-limit, whitelisting an address, re-pointing a contact, revealing a recovery
-phrase, exporting, removing an account — asks for the PIN in a step-up
-dialog, and requires a PIN to be set up first. Tightening never asks.
+Anything that weakens protection or exposes keys — loosening a preset or a limit, whitelisting, switching a security check off, removing a denylisted address, revealing a recovery phrase, exporting, removing an account — asks for the PIN. Tightening never asks.
+
+### Security modes
+
+| Preset | Signs on its own | Asks you |
+|---|---|---|
+| `strict` (recommended) | nothing | everything |
+| `micropay` (new wallets) | x402 USDC payments ≤ 1 each, ≤ 10 a day, after a merchant's first payment | everything else |
+| `testnet` | small testnet operations | mainnet |
+| `power` | mainnet native transfers ≤ 0.01 each, ≤ 0.05 a day | tokens, approvals, permits |
+| `locked` | nothing (refuses everything) | — |
+
+Hard limits (stablecoin and native caps, transfer whitelist) and critical security findings refuse a request even after you click approve.
+
+### Service API (`ctx.wallet`)
+
+Other plugins can use the same pipeline the tools use:
+
+```ts
+const prepared = await ctx.wallet.prepareTransfer({ account: 'main', chainId: 8453, to: 'alice', amount: '25', token: 'USDC' });
+// prepared.summary, prepared.security.findings, prepared.willRequire
+const result = await ctx.wallet.executePrepared(prepared.preparedId, approvalGateway, { toolName: 'my-plugin' });
+
+await ctx.wallet.checkAddress({ address: '0x…', chainId: 1 });   // denylist, sanctions, look-alikes
+await ctx.wallet.signTypedData({ account, domain, types, value }, approvalGateway);
+await ctx.wallet.authorizeX402({ account, challenge }, approvalGateway);
+```
+
+-----
+
+## Understand the implementation
+
+<details>
+<summary>Implementation internals — click to expand</summary>
+
+### Signing pipeline
+
+```text
+prepare  resolve recipient / token / amount → populate (nonce, gas, fees)
+         → decode intent → preflight (revert, balance) → policy dry-run
+         → security checks → escalate → single-use preparedId (15 min)
+execute  per-account lock → refresh nonce / fees → policy → security re-check
+         → vault lock + daily PIN → human approval (when `ask`) → sign
+         → journal → broadcast
+```
+
+The model only expresses intent. Recipient labels, token symbols, decimals, and calldata are resolved by the wallet; the prepared plan is exactly what gets signed; retries are safe through single-use ids, idempotency keys, and a journal written before broadcast.
+
+### Decisions
+
+1. **Signing policy** (`policy.json`): `allow` / `ask` / `deny` rules. Asset-moving intents (token transfers, approvals, permits) are auto-signed only by rules that list them explicitly and stay within per-token limits; unlimited approvals always ask.
+2. **Hard limits** (`limits.json`): transfer whitelist and per-transfer / daily caps; a violation is `deny`.
+3. **Pre-signing security checks** (`security.json`), run in parallel with per-check time budgets:
+
+| Check | What it catches | Network |
+|---|---|---|
+| `local` | Address poisoning, first-time recipients, tokens sent to token contracts, approvals / permits to plain wallets, unlimited approvals, long-lived permits, chain-less signatures | chain RPC |
+| `denylist` | User denylist + cached OFAC SDN and ScamSniffer lists (refreshed daily) | none at decision time |
+| `sanctions` | Chainalysis sanctions oracle (Ethereum, OP, BSC, Polygon, Arbitrum, Avalanche) | chain RPC |
+| `simulation` | `eth_simulateV1` reconciled with the decoded intent: extra outflows, wrong amounts, hidden approvals, recipients that forward funds onward, funds reaching denylisted addresses | chain RPC |
+| `goplus` | GoPlus address reputation and honeypot tokens you would receive — **off by default**, it sends counterparty and received-token addresses to GoPlus | GoPlus API |
+
+A `critical` finding refuses the request, `high` forces human approval even when a rule would auto-sign, `warn` / `info` are shown. Checks only ever tighten a decision. A check that cannot finish reports `SECURITY_CHECK_UNAVAILABLE`, whose weight is the user's `onUnavailable` setting.
+
+### Secrets
+
+- Key files are scrypt + AES-256-GCM encrypted, one per account, with the account id bound into the authentication tag.
+- The vault passphrase resolves from `DSH_WALLET_PASSPHRASE`, then the macOS Keychain, then the DSH credentials store; in `auto` mode a 32-byte random passphrase is generated on first use. A passphrase found in the plaintext credentials file is moved into the Keychain.
+- The daily PIN is stored as an scrypt hash keyed by a pepper kept in the Keychain.
+- Tools never return recovery phrases, private keys, or the PIN; backups happen in the settings panel.
+
+### Files (vault directory)
+
+`vault.json` (accounts, no secrets) · `keys/<id>.json` (encrypted keys, 0600) · `policy.json` · `limits.json` · `security.json` · `denylist.json` · `denylist-feeds.json` · `address-book.json` · `tx-journal.json` · `spend-state.json` · `pin.json` · `audit/audit-<date>.jsonl`. `policy.json`, `limits.json`, `security.json`, and `denylist.json` fail closed: a corrupt file stops the vault from opening instead of silently dropping protection.
+
+### Surfaces
+
+- `ctx.wallet` — the service ([`src/service.ts`](src/service.ts)).
+- `wallet_*` tools registered on `ctx.tools` ([`src/tools.ts`](src/tools.ts)).
+- Typert Remote namespace `web3/*` for the settings panel ([`src/remote.ts`](src/remote.ts), [`client/client.js`](client/client.js)).
+- Read-only HTTP routes under `/api/dsh-web3/*` where an `http` service exists.
+- The `dsh-web3-wallet` skill through `ctx.skills.registerProvider`.
+
+</details>
+
+-----
+
+## Model Experience
+
+### Wallet tools
+
+#### What the model sees
+
+30 `wallet_*` function tools. The main ones:
+
+| Tool | Purpose |
+|---|---|
+| `wallet_status`, `wallet_list`, `wallet_balance`, `wallet_chains` | State, accounts, balances, supported chains and token symbols |
+| `wallet_transfer` → `wallet_send_transaction` | Transfers in human units (`amount: "25"`, `token: "USDC"`); preview with `dryRun`, execute by `preparedId` |
+| `wallet_prepare_transaction`, `wallet_approve_token`, `wallet_allowance` | Contract calls and ERC-20 allowances, decoded into an intent |
+| `wallet_sign_message`, `wallet_sign_typed_data`, `wallet_x402_authorize` | EIP-191 / EIP-712 signing and x402 `exact` payments |
+| `wallet_tx_status`, `wallet_history`, `wallet_replace_transaction` | Status, local history, speed-up / cancel |
+| `wallet_security_check`, `wallet_denylist` | Check an address before paying it; denylist an address (removal is panel-only) |
+| `wallet_policy_get`, `wallet_policy_set` | Read policy and limits; tighten only |
+| `wallet_address_book`, `wallet_create`, `wallet_import`, `wallet_remove_account`, `wallet_export_keystore`, `wallet_reveal_secret`, `wallet_pin_status`, `wallet_pin_verify`, `wallet_unlock`, `wallet_lock`, `wallet_audit_log` | Contacts, account lifecycle, backup guidance, gates, audit |
+
+Results carry a `status`, a `next` hint, and structured `security.findings`; failures are `{ ok: false, code, message, hint }` with stable codes. In the DSH chat, each call shows a native tool card such as `25 USDC → 0x7099…79C8 · Base`.
+
+#### Token effect
+
+The tool declarations add about 18,000 characters (roughly 5–6k tokens) to every request while the plugin is loaded. Each call adds its JSON result; previews with a simulation are the largest (typically 1–3k tokens).
+
+#### KV Cache effect
+
+Declarations are static, so they cache with the rest of the tool list. Installing, removing, or disabling the plugin changes the tool list and invalidates the cached prefix once.
+
+### Bundled skill
+
+#### What the model sees
+
+The `dsh-web3-wallet` skill appears in the session skill catalog as one line (about 350 characters, Chinese and English trigger words) that routes wallet, transfer, token, signing, x402, and wallet-policy requests to the `wallet_*` tools ahead of shell scripts or other wallet skills. Loading it adds the full playbook: intent routing, rules, flows, status handling, and how to relay security findings.
+
+#### Token effect
+
+The catalog line is always present; the skill body (about 11,000 characters) enters the context only when the model loads it.
+
+#### KV Cache effect
+
+The catalog line is static. A loaded skill body is appended like any tool result.
+
+-----
+
+## Known Limitations
+
+- **Same-user boundary.** Any program running as your OS user — including an agent with unrestricted shell access — can read the vault passphrase from the login Keychain without a prompt and decrypt the key files. Keep this a hot wallet for small amounts, and do not give agents unrestricted shell access in sessions that use it.
+- Policy, limits, and security checks apply only to signing through this plugin; a stolen key bypasses them.
+- No hardware wallet or smart-account (session key) support yet.
+- Threat intelligence is limited to OFAC, ScamSniffer, the sanctions oracle, and optional GoPlus.
+- Some RPCs (for example Avalanche's public endpoint) do not support `eth_simulateV1`; on those chains the preview notes that no simulation ran.
+- The code has not had an external security audit.
+
+Report vulnerabilities privately as described in [SECURITY.md](../../SECURITY.md).
+
+## Further Exploration
+
+- [`dsh-web3-core`](../dsh-web3-core/README.md) — the vault, policy, intent, simulation, and denylist library this plugin builds on.
+- [Wallet design](../../docs/wallet-design.md) — feature map, threat model, and change history (Chinese).
+- [Bundled skill](skills/dsh-web3-wallet/SKILL.md) — the playbook the model loads.
+- [Changelog](../../CHANGELOG.md)
 
 ## License
 
-MIT
+[MIT](LICENSE)

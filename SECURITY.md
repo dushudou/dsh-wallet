@@ -4,7 +4,7 @@ dsh-web3 holds private keys and signs transactions, so we treat security reports
 
 ## Reporting a vulnerability
 
-**Do not open a public issue.** Report privately through GitHub: open the repository's **Security** tab and choose **Report a vulnerability** (<https://github.com/dushudou/dsh-wallet/security/advisories/new>).
+**Do not open a public issue.** Report privately through GitHub: open the repository's **Security** tab and choose **Report a vulnerability** (<https://github.com/dushudou/dsh-web3/security/advisories/new>).
 
 Please include the affected package and version, the steps or a proof of concept, and the impact you expect (key disclosure, unauthorized signing, bypass of a policy, limit, or security check, and so on). We aim to acknowledge reports within 3 days and to ship a fix or mitigation for confirmed critical issues within 14 days, then publish an advisory crediting the reporter unless you prefer otherwise.
 

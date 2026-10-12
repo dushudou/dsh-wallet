@@ -1,6 +1,6 @@
 {
   "name": "dsh-web3-core",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Agent-safe EVM wallet core: encrypted key vault, HD accounts, declarative signing policy, chain providers, and EIP-191/EIP-712/EIP-1559 signing.",
   "keywords": [
     "web3",
@@ -12,15 +12,15 @@
     "agent",
     "dsh"
   ],
-  "homepage": "https://github.com/dushudou/dsh-wallet/tree/main/packages/dsh-web3-core#readme",
+  "homepage": "https://github.com/dushudou/dsh-web3/tree/main/packages/dsh-web3-core#readme",
   "bugs": {
-    "url": "https://github.com/dushudou/dsh-wallet/issues"
+    "url": "https://github.com/dushudou/dsh-web3/issues"
   },
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dushudou/dsh-wallet.git",
+    "url": "git+https://github.com/dushudou/dsh-web3.git",
     "directory": "packages/dsh-web3-core"
   },
   "main": "./lib/index.js",

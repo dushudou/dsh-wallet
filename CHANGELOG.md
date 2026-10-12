@@ -2,6 +2,12 @@
 
 All notable changes to `dsh-web3` (the DSH bundle) and `dsh-web3-core` (the library). Dates are npm publish dates. The project follows [Semantic Versioning](https://semver.org/); while in `0.x`, a minor version may contain breaking changes, which are listed under **Breaking**.
 
+## dsh-web3 0.8.1 / dsh-web3-core 0.4.1 — 2026-10-13
+
+### Changed
+
+- The GitHub repository moved to [dushudou/dsh-web3](https://github.com/dushudou/dsh-web3) (the old `dsh-wallet` address redirects); package metadata and documentation links point at it. No code changes.
+
 ## dsh-web3 0.8.0 / dsh-web3-core 0.4.0 — 2026-10-12
 
 ### Added

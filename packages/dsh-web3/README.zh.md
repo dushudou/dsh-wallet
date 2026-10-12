@@ -3,7 +3,7 @@
 [English](README.md) | 中文
 
 [![npm](https://img.shields.io/npm/v/dsh-web3.svg)](https://www.npmjs.com/package/dsh-web3)
-[![CI](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml/badge.svg)](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml)
+[![CI](https://github.com/dushudou/dsh-web3/actions/workflows/ci.yml/badge.svg)](https://github.com/dushudou/dsh-web3/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/dsh-web3.svg)](LICENSE)
 
 面向 [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh) 的 Agent 安全 EVM 钱包，以 DSH bundle 的形式发布。

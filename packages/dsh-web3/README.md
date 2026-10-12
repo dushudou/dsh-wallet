@@ -3,7 +3,7 @@
 English | [中文](README.zh.md)
 
 [![npm](https://img.shields.io/npm/v/dsh-web3.svg)](https://www.npmjs.com/package/dsh-web3)
-[![CI](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml/badge.svg)](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml)
+[![CI](https://github.com/dushudou/dsh-web3/actions/workflows/ci.yml/badge.svg)](https://github.com/dushudou/dsh-web3/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/dsh-web3.svg)](LICENSE)
 
 An agent-safe EVM wallet for [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh), packaged as a DSH bundle.

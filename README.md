@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-[![CI](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml/badge.svg)](https://github.com/dushudou/dsh-wallet/actions/workflows/ci.yml)
+[![CI](https://github.com/dushudou/dsh-web3/actions/workflows/ci.yml/badge.svg)](https://github.com/dushudou/dsh-web3/actions/workflows/ci.yml)
 [![dsh-web3](https://img.shields.io/npm/v/dsh-web3.svg?label=dsh-web3)](https://www.npmjs.com/package/dsh-web3)
 [![dsh-web3-core](https://img.shields.io/npm/v/dsh-web3-core.svg?label=dsh-web3-core)](https://www.npmjs.com/package/dsh-web3-core)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

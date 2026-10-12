@@ -18,6 +18,10 @@ export * from './intent.js';
 export { TxJournal } from './journal.js';
 export type { JournalEntry, JournalStatus } from './journal.js';
 export { AddressBook } from './addressbook.js';
+export * from './security.js';
+export * from './simulate.js';
+export { Denylist, DENYLIST_FEEDS, parseFeed } from './denylist.js';
+export type { DenylistEntry, DenylistHit, DenylistCategory, DenylistFeedSpec, FeedState, FeedFetcher } from './denylist.js';
 export {
   defaultLimits,
   validateLimits,

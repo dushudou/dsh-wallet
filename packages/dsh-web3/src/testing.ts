@@ -1,4 +1,4 @@
-import type { ChainProvider, FeeData, TxReceipt } from 'dsh-web3-core';
+import { SimulationUnsupportedError, type ChainProvider, type FeeData, type SimulationResult, type TxReceipt } from 'dsh-web3-core';
 
 /** In-memory ChainProvider for plugin tests: no network, canned values. */
 export class MockChainProvider implements ChainProvider {
@@ -20,6 +20,13 @@ export class MockChainProvider implements ChainProvider {
   /** When set, the next broadcast rejects with this error. */
   broadcastError: Error | undefined;
   broadcasted: string[] = [];
+  /**
+   * `eth_simulateV1` answer: a canned result, a function of the call, or an
+   * error to throw. Undefined = the RPC does not support simulation.
+   */
+  simulation: SimulationResult | Error | ((call: { from: string; to: string; value: bigint; data: string }) => SimulationResult) | undefined;
+  /** Every simulated call, in order. */
+  simulated: Array<{ from: string; to: string; value: bigint; data: string }> = [];
 
   constructor(chainId = 31337) {
     this.chainId = chainId;
@@ -52,6 +59,14 @@ export class MockChainProvider implements ChainProvider {
 
   async getFeeData(): Promise<FeeData> {
     return this.feeData;
+  }
+
+  async simulate(call: { from: string; to: string; value: bigint; data: string }): Promise<SimulationResult> {
+    this.simulated.push(call);
+    const answer = this.simulation;
+    if (answer === undefined) throw new SimulationUnsupportedError();
+    if (answer instanceof Error) throw answer;
+    return typeof answer === 'function' ? answer(call) : answer;
   }
 
   async resolveName(name: string): Promise<string | null> {

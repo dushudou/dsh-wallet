@@ -145,6 +145,8 @@ export interface PolicyDecision {
   guardrail?: string;
   /** Hard wallet limit that refused the request (see `checkLimits`), when one fired. */
   limit?: { code: 'RECIPIENT_NOT_WHITELISTED' | 'LIMIT_EXCEEDED'; name: string };
+  /** Security findings (warn or stronger) that shaped the decision (see `escalateDecision`). */
+  risk?: { severity: 'info' | 'warn' | 'high' | 'critical'; codes: string[] };
 }
 
 /** Secret-free summary of a request, used in decisions and audit entries. */

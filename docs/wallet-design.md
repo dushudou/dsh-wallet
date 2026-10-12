@@ -35,7 +35,7 @@
 | **安全** | 加密保险库（口令存 macOS 钥匙串）、自动锁、签名策略、每日 PIN、审批、审计 | ✅ |
 | | 意图感知策略 + 护栏（代币金额、无限授权） | 🆕 |
 | | 预检：余额、会回滚、零地址、转给代币合约本身、地址投毒、首次收款人 | 🆕 |
-| | 交易模拟（资产变化预览）、钓鱼/黑名单地址库 | 🗺 |
+| | 交易模拟对账（`eth_simulateV1`）、黑名单（OFAC / ScamSniffer / 用户）、链上制裁预言机、GoPlus 信誉（可选） | ✅（§8） |
 | **生态接入** | Swap / 跨链桥（聚合器）、dApp 连接（EIP-1193 / WalletConnect） | 🗺 |
 
 ---
@@ -173,8 +173,8 @@
 ## 6. 路线图
 
 1. **进程外签名器**：独立系统用户或系统钥匙串（用户在场验证），关闭“同用户 shell 可解密”这一边界。
-2. **交易模拟**：接入 trace/模拟服务，在预览中展示资产变化。
-3. **地址信誉**：已知钓鱼/制裁地址库（本地缓存）。
+2. ~~**交易模拟**~~：已完成（§8，`eth_simulateV1` 对账）。
+3. ~~**地址信誉**~~：已完成（§8，黑名单库 + 制裁预言机 + 可选 GoPlus）。
 4. **索引能力**：代币自动发现、NFT、全量授权扫描与撤销、完整历史（含转入）。
 5. **Swap / 跨链**：接聚合器报价，复用 prepare → execute 与护栏。
 6. **智能账户**：ERC-4337 / EIP-7702 session key，把额度约束从插件层下沉到合约层。
@@ -227,3 +227,57 @@
   - **保险库口令**：解析顺序中钥匙串优先于明文凭据文件；发现明文副本时自动迁入钥匙串，写入失败则保留明文副本，不丢口令。
   - **PIN pepper**：PIN 哈希改为以钥匙串中 32 字节 pepper 做 HMAC 后再派生（PIN 文件 v2）。只偷走 PIN 文件无法离线暴力破解；v1 旧文件继续可校验。pepper 读不到时报 `PinPepperUnavailableError`，不降级为无 pepper 校验。
 - **验证**：235 个单测全部通过（含钥匙串优先、明文迁移、写入失败回退）；真实钥匙串冒烟测试（写入、覆盖、pepper 稳定、删除）通过。
+
+---
+
+## 8. 2026-10-12 增补：签名前安全检查（风险引擎，core 0.4.0 / web3 0.8.0）
+
+### 8.1 要解决的问题
+
+此前的预检结果只是字符串 `warnings`，**不影响放行决策**：`power` 预设会自动签署 ≤0.01 ETH 的主网转账，即使预检报了 `ADDRESS POISONING RISK`，这条警告也只返回给 Agent，审批框不会出现；被提示词注入的 Agent 可以直接无视。签名路径（Permit、x402）则完全没有预检。
+
+### 8.2 设计
+
+```text
+prepare / execute / signTypedData / x402
+        │  SecuritySubject（意图、链、交易、相关地址及其角色）
+        ▼
+ RiskCheck[] 并行执行，每项有独立时间预算
+   local · denylist · sanctions · simulation · goplus(可选)
+        ▼
+ RiskFinding { code, severity, message, check, address }
+        ▼
+ escalateDecision：critical → deny，high → ask，只收紧不放宽
+        ▼
+ 最终 decision = 策略 → 硬性限额 → 安全检查
+```
+
+- **结构化结果**：`PreparedView.security = { severity, findings, checks, simulation }`；`warnings` 保留为同样内容的纯文本，兼容旧调用方。审批框新增「Security checks」区块。
+- **执行前复查**：预览超过 30 秒后执行时重新检查（链上状态、黑名单都可能变化）；一步完成的转账复用刚做的检查。
+- **失败策略**：检查超时或出错生成 `SECURITY_CHECK_UNAVAILABLE`，严重程度由用户设置 `onUnavailable`（warn / ask / deny）决定；RPC 不支持模拟属于“跳过”，只给 info。
+- **只收紧**：Agent 可以拉黑地址（`wallet_denylist add`），不能移除；面板里关闭任何检查、放宽 `onUnavailable`、移除黑名单都需要 PIN。`security.json` 与 `denylist.json` 损坏时保险库拒绝打开（失败即关闭），下载的黑名单缓存损坏则重新下载。
+
+### 8.3 检查项
+
+| 检查 | 发现（严重程度） | 依赖 |
+|---|---|---|
+| `local` | 地址投毒 `ADDRESS_POISONING`(high)、授权给普通钱包 `APPROVAL_TO_EOA`(high)、无限授权(high)、收款方是代币合约(high)、首次收款人(warn)、收款方是合约/7702 委托账户(warn)、Permit 期限过长(warn)、签名不含 chainId(warn)、ENS 解析(info) | 链 RPC |
+| `denylist` | `DENYLISTED_ADDRESS`(critical)：用户黑名单、OFAC SDN 以太坊地址、ScamSniffer 诈骗库 | 本地缓存（每日更新） |
+| `sanctions` | `SANCTIONED_ADDRESS`(critical)：Chainalysis 链上制裁预言机 `0x40C5…C8fb` | 链 RPC（1/10/56/137/42161/43114） |
+| `simulation` | 多出的转出、金额不符、隐藏授权、收款后立即转走（清扫地址）、资金流向黑名单地址、模拟回滚(high/critical)；合约调用的资产变化(info)、只出不进(warn) | 链 RPC（`eth_simulateV1`） |
+| `goplus` | 盗币/钓鱼/制裁地址(critical)、其他恶意标记(high)、收到貔貅币(high) | GoPlus API，默认关闭 |
+
+### 8.4 外部依赖的核实（2026-10-11）
+
+- OFAC：`0xB10C/ofac-sanctioned-digital-currency-addresses` 的 `sanctioned_addresses_ETH.json`（120 个地址）；ScamSniffer：`scam-database/blacklist/address.json`（2530 个地址）。均为 JSON 数组，下载失败或内容为空时保留旧列表。
+- Chainalysis 预言机：`eth_getCode` 确认部署于以太坊、OP、BSC、Polygon、Arbitrum、Avalanche，Base 与 Gnosis 没有；用 OFAC 地址实测返回 `true`、普通地址返回 `false`。
+- `eth_simulateV1`：默认 RPC 中以太坊（publicnode / drpc）、OP、BSC、Polygon、Base、Arbitrum、Gnosis 支持；cloudflare-eth 与 Avalanche 官方 RPC 不支持（降级为 info）。`traceTransfers` 把原生币转账报告为 `0xeeee…eeee` 发出的 Transfer 日志。
+- 实测发现：hardhat 测试账户 #2（`0x3C44…93BC`）在 Base 主网上是一个清扫合约，收到 ETH 后同一笔交易内转给 `0xCc04…3B95`；模拟检查据此判为 `RECIPIENT_FORWARDS_FUNDS`(high)。
+- GoPlus：`address_security` 与 `token_security` 无需 API key；OFAC 地址返回 `stealing_attack`、`sanctioned`、`blacklist_doubt`。
+
+### 8.5 验证
+
+- 单测：核心 + 插件共 260 个（新增引擎/升级/设置/黑名单/模拟对账 11 个，插件端到端 14 个）。
+- 真实网络：Base 上的真实模拟抓到清扫地址；黑名单库真实下载；对 OFAC 地址的检查由黑名单、制裁预言机、GoPlus 三个来源同时判为 critical，并行总耗时约 1.5 秒。
+- 面板：React 服务端渲染确认安全检查与黑名单区块正常显示（含下载失败状态），后端为旧版本时不显示新区块、不报错。
+

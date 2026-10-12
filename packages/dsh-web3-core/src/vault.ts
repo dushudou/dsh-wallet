@@ -8,6 +8,8 @@
  * vault.json           account metadata (no secrets)
  * policy.json          signing policy (no secrets)
  * limits.json          hard limits + whitelist switch (no secrets)
+ * security.json        pre-signing security check settings (no secrets)
+ * denylist.json        user denylist; denylist-feeds.json caches public feeds
  * spend-state.json     rolling-24h spend tracking (no secrets)
  * keys/<accountId>.json  AES-256-GCM encrypted key material (0600)
  * audit/audit-<date>.jsonl  append-only audit trail (no secrets)
@@ -52,6 +54,8 @@ import { TxJournal } from './journal.js';
 import { AddressBook } from './addressbook.js';
 import { policyPreset } from './policy/presets.js';
 import { defaultLimits, normalizeLimits, validateLimits, type WalletLimits } from './limits.js';
+import { Denylist } from './denylist.js';
+import { loadSecuritySettings, normalizeSecuritySettings, validateSecuritySettings, type SecuritySettings } from './security.js';
 import type { PolicyRequest, SigningPolicy } from './policy/types.js';
 
 /** Vault configuration. */
@@ -157,20 +161,25 @@ export class WalletVault {
   readonly journal: TxJournal;
   /** Counterparty labels. */
   readonly addressBook: AddressBook;
+  /** Addresses the wallet refuses to pay or grant permissions to. */
+  readonly denylist: Denylist;
 
-  private constructor(config: VaultConfig, index: VaultIndex, policy: SigningPolicy, limits: WalletLimits) {
+  private constructor(config: VaultConfig, index: VaultIndex, policy: SigningPolicy, limits: WalletLimits, security: SecuritySettings) {
     this.config = { autoLockMs: DEFAULT_AUTO_LOCK_MS, ...config };
     this.index = index;
     this.policy = policy;
     this.limits = limits;
+    this.security = security;
     this.audit = new AuditLog(config.directory);
     this.spend = new SpendTracker(config.directory);
     this.journal = new TxJournal(config.directory);
     this.addressBook = new AddressBook(config.directory);
+    this.denylist = new Denylist(config.directory);
   }
 
   private policy: SigningPolicy;
   private limits: WalletLimits;
+  private security: SecuritySettings;
 
   /** Open (or initialize) a vault directory. */
   static async open(config: VaultConfig): Promise<WalletVault> {
@@ -220,10 +229,14 @@ export class WalletVault {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') limits = defaultLimits();
       else throw error;
     }
-    const vault = new WalletVault(config, index, policy, limits);
+    // Security settings and the user denylist fail closed too: losing either
+    // silently would switch protections off.
+    const security = await loadSecuritySettings(join(config.directory, 'security.json'));
+    const vault = new WalletVault(config, index, policy, limits, security);
     await vault.spend.load().catch(() => undefined);
     await vault.journal.load().catch(() => undefined);
     await vault.addressBook.load().catch(() => undefined);
+    await vault.denylist.load();
     return vault;
   }
 
@@ -268,6 +281,20 @@ export class WalletVault {
     this.limits = limits;
     await writeJsonPrivate(join(this.config.directory, 'limits.json'), limits);
     return this.getLimits();
+  }
+
+  /** Current security check settings. */
+  getSecuritySettings(): SecuritySettings {
+    return JSON.parse(JSON.stringify(this.security)) as SecuritySettings;
+  }
+
+  /** Replace the security settings after validation. Callers decide who may loosen them. */
+  async setSecuritySettings(next: SecuritySettings): Promise<SecuritySettings> {
+    const errors = validateSecuritySettings(next);
+    if (errors.length > 0) throw new Error(`invalid security settings: ${errors.join('; ')}`);
+    this.security = normalizeSecuritySettings({ ...next, updatedAt: new Date().toISOString() });
+    await writeJsonPrivate(join(this.config.directory, 'security.json'), this.security);
+    return this.getSecuritySettings();
   }
 
   /** Overall vault status (no secrets). */

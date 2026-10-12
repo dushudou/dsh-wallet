@@ -12,6 +12,8 @@ const home = mkdtempSync(join(tmpdir(), 'dsh-web3-test-home-'));
 process.env.DSH_HOME = home;
 // Never read or write the developer's real macOS Keychain from tests.
 process.env.DSH_WEB3_SECRET_STORE = 'none';
+// Never download the public denylists from tests.
+process.env.DSH_WEB3_DENYLIST_REFRESH = 'off';
 
 afterAll(() => {
   rmSync(home, { recursive: true, force: true });

@@ -356,11 +356,60 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
       output: OUTPUT,
     },
 
+    // ── security ────────────────────────────────────────────────────────
+    {
+      name: 'wallet_security_check',
+      description:
+        'Check an address BEFORE paying or approving it: denylist (OFAC sanctions + scam database + user list), on-chain sanctions oracle, look-alikes of known contacts (address poisoning), wallet vs contract, and GoPlus reputation when the user enabled it. Read-only. Every transfer, approval, and signature is checked automatically anyway; use this when the user asks "is this address safe?" or before suggesting a new payee.',
+      parameters: {
+        address: { type: 'string', description: 'Full 0x address, ENS name, or exact address-book label.', required: true },
+        chainId,
+        account: { type: 'string', description: 'Optional: the account that would pay (for "have I paid this before" and look-alike checks).' },
+      },
+      execute: guarded(async (args) =>
+        service.checkAddress({ address: requireStr(args, 'address'), chainId: args.chainId as number, ...(str(args, 'account') !== undefined ? { account: str(args, 'account')! } : {}) }),
+      ),
+      output: OUTPUT,
+      isConcurrencySafe: readOnly,
+    },
+    {
+      name: 'wallet_denylist',
+      description:
+        'The wallet denylist: addresses it refuses to pay or grant permissions to (critical finding, no approval can override). action=list (read-only) or add (e.g. when the user says an address scammed them). Removing an address loosens protection: it returns status "use-panel"; tell the user to remove it in DSH Settings → Web3 → Security (PIN-confirmed).',
+      parameters: {
+        action: { type: 'string', enum: ['list', 'add', 'remove'], required: true },
+        address: { type: 'string', description: 'Full 0x address (add/remove).' },
+        label: { type: 'string', description: 'Short reason shown in findings, e.g. "phishing site payee" (add).' },
+        note: { type: 'string', description: 'Optional longer note (add).' },
+      },
+      execute: guarded(async (args) => {
+        const action = requireStr(args, 'action');
+        if (action === 'list') {
+          const view = service.securityView();
+          return { entries: view.denylist, feeds: view.feeds.map(({ id, name, count, fetchedAt }) => ({ id, name, count, enabled: view.settings.feeds[id], ...(fetchedAt !== undefined ? { fetchedAt } : {}) })) };
+        }
+        if (action === 'add') {
+          const entry = await service.denylistAdd({ address: requireStr(args, 'address'), ...(str(args, 'label') !== undefined ? { label: str(args, 'label')! } : {}), ...(str(args, 'note') !== undefined ? { note: str(args, 'note')! } : {}) }, 'agent');
+          return { added: true, entry };
+        }
+        if (action === 'remove') {
+          await service.vault.auditAppend('tool.denylist_remove_redirected', { address: str(args, 'address') });
+          return {
+            removed: false,
+            status: 'use-panel',
+            message: '从黑名单移除地址会降低安全保护，只能由用户在 DSH 设置 → Web3 → 安全 中完成，并需要输入 PIN 确认。请把这一点告诉用户。',
+          };
+        }
+        throw new WalletError('INVALID_ARGUMENT', `unknown action "${action}"`, 'Use list, add, or remove.');
+      }),
+      output: OUTPUT,
+    },
+
     // ── sending ─────────────────────────────────────────────────────────
     {
       name: 'wallet_transfer',
       description:
-        'Send native coin or an ERC-20 token using HUMAN units: amount "0.05" + token "USDC" (the wallet converts with the token\'s real decimals — never convert to wei yourself). Recommended flow: call with dryRun=true, show the user `summary` and every `warnings` entry, get confirmation, then execute with wallet_send_transaction { preparedId }. Without dryRun it prepares and sends in one step (policy / daily PIN / human approval still apply).',
+        'Send native coin or an ERC-20 token using HUMAN units: amount "0.05" + token "USDC" (the wallet converts with the token\'s real decimals — never convert to wei yourself). Recommended flow: call with dryRun=true, show the user `summary` and every `security.findings` entry (HIGH/CRITICAL ones word for word), get confirmation, then execute with wallet_send_transaction { preparedId }. Without dryRun it prepares and sends in one step (policy / daily PIN / human approval still apply).',
       parameters: {
         account: accountSelector,
         chainId,
@@ -791,6 +840,12 @@ const PRESENTERS: Record<string, Presenter> = {
     const action = text(args.action) ?? 'list';
     if (action === 'list') return read('Address book');
     return { title: joinTitle(action === 'add' ? 'Save contact' : 'Remove contact', text(args.label), action === 'add' ? party(args.address) : undefined), kind: action === 'add' ? 'edit' : 'delete' };
+  },
+  wallet_security_check: (args) => read(joinTitle(`Security check ${party(args.address)}`, chainName(args.chainId))),
+  wallet_denylist: (args) => {
+    const action = text(args.action) ?? 'list';
+    if (action === 'list') return read('Denylist');
+    return { title: joinTitle(action === 'add' ? 'Denylist address' : 'Remove from denylist', party(args.address)), kind: action === 'add' ? 'edit' : 'delete' };
   },
   wallet_transfer: (args) => ({
     title: joinTitle(`${args.dryRun === true ? 'Preview ' : ''}${text(args.amount) ?? '?'} ${text(args.token) ?? 'native'} → ${party(args.to)}`, chainName(args.chainId)),

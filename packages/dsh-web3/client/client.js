@@ -284,6 +284,16 @@ window.__ModuleLoader__.load({
 				// activity
 				activityTx: "交易", activityAudit: "审计日志", txEmpty: "钱包还没有发出过交易。", auditEmpty: "暂无记录。", explorer: "浏览器",
 				st_pending: "待确认", st_success: "成功", st_reverted: "失败", st_rejected: "被拒绝", st_replaced: "已替换", st_unknown: "未知", "st_broadcast-uncertain": "待查证",
+				// transaction security
+				checksSection: "交易安全检查", checksDesc: "每笔转账、授权和签名在签名前都会自动检查。严重风险会被直接拒绝（审批也无法放行），高风险必须由你确认。",
+				chkSimulation: "交易模拟", chkSimulationHint: "签名前在链上模拟，核对实际资产变化与请求是否一致，并识别收款后立即转走资金的地址。",
+				chkSanctions: "链上制裁名单", chkSanctionsHint: "查询 Chainalysis 链上制裁预言机（以太坊、Arbitrum、OP、Polygon、BSC、Avalanche）。",
+				chkOfac: "OFAC 制裁地址库", chkScam: "ScamSniffer 诈骗地址库", feedCount: "{n} 个地址", feedUpdated: "更新于 {t}", feedNever: "尚未下载", feedError: "上次更新失败：{e}",
+				chkGoplus: "GoPlus 地址与代币信誉", chkGoplusHint: "开启后会把收款方 / 授权对象的地址，以及模拟中你将收到的代币地址发送给 GoPlus 查询（不发送你的地址和金额）。",
+				onUnavailable: "检查无法完成时", onUnavailableHint: "例如网络故障或第三方服务超时。", unavailWarn: "仅提示", unavailAsk: "需要确认", unavailDeny: "拒绝",
+				refreshFeeds: "立即更新", checksSaved: "安全检查设置已保存", feedsRefreshed: "地址库已更新",
+				denySection: "黑名单", denyDesc: "向这些地址转账或授权会被直接拒绝。Agent 可以添加，移除需要你输入 PIN。", denyEmpty: "黑名单为空。",
+				denyAdd: "添加地址", denyAddDesc: "之后向该地址的转账、授权和签名都会被拒绝。", denyLabel: "原因（可选）", denyAdded: "已加入黑名单", denyRemoved: "已从黑名单移除",
 				// pin step-up
 				stepUpTitle: "输入 PIN 确认", stepUpText: "此操作会降低安全保护或涉及密钥，需要验证 PIN。",
 				stepUpSetupText: "此操作需要 PIN 保护，请先在「安全」中设置 PIN。", goSetPin: "去设置",
@@ -354,6 +364,15 @@ window.__ModuleLoader__.load({
 				advanced: "Policy rules", advancedShow: "Show {n} rules", advancedHide: "Hide",
 				activityTx: "Transactions", activityAudit: "Audit log", txEmpty: "This wallet has not sent any transactions.", auditEmpty: "Nothing yet.", explorer: "Explorer",
 				st_pending: "Pending", st_success: "Success", st_reverted: "Failed", st_rejected: "Rejected", st_replaced: "Replaced", st_unknown: "Unknown", "st_broadcast-uncertain": "Unconfirmed",
+				checksSection: "Transaction security checks", checksDesc: "Every transfer, approval, and signature is checked before signing. Critical risks are refused (even an approval cannot pass them); high risks always need your confirmation.",
+				chkSimulation: "Transaction simulation", chkSimulationHint: "Simulates on-chain before signing, checks the real asset changes match the request, and spots recipients that immediately forward funds.",
+				chkSanctions: "On-chain sanctions list", chkSanctionsHint: "Queries the Chainalysis sanctions oracle (Ethereum, Arbitrum, OP, Polygon, BSC, Avalanche).",
+				chkOfac: "OFAC sanctioned addresses", chkScam: "ScamSniffer scam addresses", feedCount: "{n} addresses", feedUpdated: "updated {t}", feedNever: "not downloaded yet", feedError: "last update failed: {e}",
+				chkGoplus: "GoPlus address & token reputation", chkGoplusHint: "Sends recipient / spender addresses, and the tokens a simulation says you would receive, to GoPlus (never your address or amounts).",
+				onUnavailable: "When a check cannot finish", onUnavailableHint: "E.g. a network error or a third-party timeout.", unavailWarn: "Warn", unavailAsk: "Ask me", unavailDeny: "Refuse",
+				refreshFeeds: "Update now", checksSaved: "Security checks saved", feedsRefreshed: "Address lists updated",
+				denySection: "Denylist", denyDesc: "Transfers and approvals to these addresses are refused. The agent can add entries; removing one needs your PIN.", denyEmpty: "The denylist is empty.",
+				denyAdd: "Add address", denyAddDesc: "Transfers, approvals, and signatures involving this address will be refused.", denyLabel: "Reason (optional)", denyAdded: "Added to the denylist", denyRemoved: "Removed from the denylist",
 				stepUpTitle: "Confirm with your PIN", stepUpText: "This weakens a protection or touches key material, so your PIN is required.",
 				stepUpSetupText: "This needs PIN protection. Set a PIN under Security first.", goSetPin: "Set PIN",
 				pinWrong: "Incorrect PIN", pinLockedNow: "Too many attempts; locked for today",
@@ -987,6 +1006,85 @@ window.__ModuleLoader__.load({
 			error ? h("div", { className: "dshw-error" }, error) : null);
 		}
 
+		function feedHint(feed) {
+			if (!feed) return t("feedNever");
+			const parts = [];
+			if (feed.count > 0) parts.push(fmt(t("feedCount"), { n: feed.count }));
+			parts.push(feed.fetchedAt ? fmt(t("feedUpdated"), { t: when(feed.fetchedAt) }) : t("feedNever"));
+			if (feed.error) parts.push(fmt(t("feedError"), { e: feed.error }));
+			return parts.join(" · ");
+		}
+
+		function ChecksSection(props) {
+			const stepUp = useStepUp();
+			const settings = props.security.settings;
+			const feeds = {};
+			(props.security.feeds || []).forEach((feed) => { feeds[feed.id] = feed; });
+			const { busy, message, act } = useAction(props.reload);
+			const save = (patch) => act(() => stepUp((pin) => api("securitySet", { settings: Object.assign({}, settings, patch), pin })), t("checksSaved"));
+			const toggle = (key, label) => h(Toggle, { checked: settings[key] === true, label, disabled: busy, onChange: (v) => void save({ [key]: v }) });
+			const feedToggle = (id, label) => h(Toggle, { checked: settings.feeds[id] === true, label, disabled: busy, onChange: (v) => void save({ feeds: Object.assign({}, settings.feeds, { [id]: v }) }) });
+			return h(Section, {
+				title: t("checksSection"), desc: t("checksDesc"),
+				actions: h(Btn, { variant: "ghost", disabled: busy, onClick: () => void act(() => api("denylistRefresh"), t("feedsRefreshed")) }, t("refreshFeeds")),
+			},
+				h(Notice, { message }),
+				h(Row, { label: t("chkSimulation"), hint: t("chkSimulationHint") }, toggle("simulation", t("chkSimulation"))),
+				h(Row, { label: t("chkSanctions"), hint: t("chkSanctionsHint") }, toggle("sanctionsOracle", t("chkSanctions"))),
+				h(Row, { label: t("chkOfac"), hint: feedHint(feeds.ofac) }, feedToggle("ofac", t("chkOfac"))),
+				h(Row, { label: t("chkScam"), hint: feedHint(feeds.scamsniffer) }, feedToggle("scamsniffer", t("chkScam"))),
+				h(Row, { label: t("chkGoplus"), hint: t("chkGoplusHint") }, toggle("goplus", t("chkGoplus"))),
+				h(Row, { label: t("onUnavailable"), hint: t("onUnavailableHint") },
+					h(Segments, {
+						id: "dshw-unavailable", value: settings.onUnavailable, label: t("onUnavailable"),
+						options: [{ value: "warn", label: t("unavailWarn") }, { value: "ask", label: t("unavailAsk") }, { value: "deny", label: t("unavailDeny") }],
+						onChange: (v) => { if (v !== settings.onUnavailable) void save({ onUnavailable: v }); },
+					})),
+			);
+		}
+
+		function DenylistSection(props) {
+			const stepUp = useStepUp();
+			const entries = props.security.denylist || [];
+			const { busy, message, act } = useAction(props.reload);
+			const [draft, setDraft] = React.useState(null);
+			const valid = draft !== null && /^0x[0-9a-fA-F]{40}$/.test(draft.address.trim());
+			const add = () => {
+				if (!valid) return;
+				const value = draft;
+				setDraft(null);
+				void act(() => api("denylistAdd", { address: value.address.trim(), label: value.label.trim() || undefined }), t("denyAdded"));
+			};
+			return h(Section, {
+				title: t("denySection"), desc: t("denyDesc"),
+				actions: h(Btn, { variant: "outline", disabled: busy, onClick: () => setDraft({ address: "", label: "" }) }, t("denyAdd")),
+			},
+				h(Notice, { message }),
+				entries.length === 0 ? h("div", { className: "dshw-empty" }, t("denyEmpty")) : entries.map((entry) => h("div", { className: "dshw-row", key: entry.address },
+					h("div", { className: "dshw-rowMain" },
+						h("div", { className: "dshw-rowLabel" }, entry.label || shortAddress(entry.address)),
+						h("div", { className: "dshw-rowHint dshw-mono" }, entry.address),
+					),
+					h("div", { className: "dshw-rowControl" },
+						h(Btn, { variant: "ghost", disabled: busy, onClick: () => void act(() => stepUp((pin) => api("denylistRemove", { address: entry.address, pin })), t("denyRemoved")) }, t("remove"))),
+				)),
+				h(Dialog, {
+					open: draft !== null, onClose: () => setDraft(null), title: t("denyAdd"), description: t("denyAddDesc"), closeLabel: t("close"),
+					footer: [
+						h(Btn, { key: "c", variant: "ghost", onClick: () => setDraft(null) }, t("cancel")),
+						h(Btn, { key: "s", variant: "primary", disabled: !valid, onClick: add }, t("add")),
+					],
+				}, draft === null ? null : [
+					h("div", { key: "a", className: "dshw-field" },
+						h("label", { className: "dshw-fieldLabel" }, t("contactAddress")),
+						h(TextInput, { value: draft.address, onChange: (v) => setDraft(Object.assign({}, draft, { address: v })), autoFocus: true, label: t("contactAddress"), placeholder: "0x…", className: "dshw-fullInput" })),
+					h("div", { key: "l", className: "dshw-field" },
+						h("label", { className: "dshw-fieldLabel" }, t("denyLabel")),
+						h(TextInput, { value: draft.label, onChange: (v) => setDraft(Object.assign({}, draft, { label: v })), onEnter: add, label: t("denyLabel"), className: "dshw-fullInput" })),
+				]),
+			);
+		}
+
 		function SecurityTab(props) {
 			const data = props.data;
 			const pin = data.pin;
@@ -1019,6 +1117,8 @@ window.__ModuleLoader__.load({
 							],
 					),
 				),
+				data.security ? h(ChecksSection, { security: data.security, reload: props.reload }) : null,
+				data.security ? h(DenylistSection, { security: data.security, reload: props.reload }) : null,
 				h(Section, { title: t("agentSection"), desc: t("agentDesc") },
 					h(Row, { label: t("agentSecrets"), hint: t("agentSecretsHint") }, settings.modelSecretReveal ? h(Badge, { tone: "danger" }, t("agentSecretsOff")) : h(Badge, { tone: "success" }, t("agentOn"))),
 					h(Row, { label: t("agentLoosen"), hint: t("agentLoosenHint") }, h(Badge, { tone: "success" }, t("agentOn"))),
@@ -1307,7 +1407,7 @@ window.__ModuleLoader__.load({
 		exports.inject = inject;
 		// Render hooks for smoke tests (ignored by the DSH loader).
 		exports.__testing = {
-			AssetsTab, AccountsTab, SecurityTab, LimitsTab, ActivityTab, Banners, Onboarding, StepUpProvider, CreateFlow, ImportFlow, BackupFlow, ExportFlow, PinDialog,
+			AssetsTab, AccountsTab, SecurityTab, ChecksSection, DenylistSection, LimitsTab, ActivityTab, Banners, Onboarding, StepUpProvider, CreateFlow, ImportFlow, BackupFlow, ExportFlow, PinDialog,
 			messages: MESSAGES,
 			setConnection: (connection) => { connectionSvc = connection; },
 		};

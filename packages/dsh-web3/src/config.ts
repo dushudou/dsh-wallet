@@ -5,7 +5,7 @@
  * - id: wallet
  *   name: 'dsh-web3'
  *   config:
- *     vaultPath: ~/.dsh/wallet
+ *     vaultPath: ~/.dsh-web3
  *     autoLockMs: 900000
  *     passphrase:
  *       mode: auto
@@ -21,7 +21,7 @@ import z from '@deepseek-ai/schemastery';
 
 export const PluginConfig = z
   .object({
-    /** Vault directory. Defaults to `$DSH_HOME/wallet` or `~/.dsh/wallet`. */
+    /** Vault directory. Defaults to `~/.dsh-web3`. */
     vaultPath: z.string(),
     /** Auto-lock idle interval in ms (default 15 min). */
     autoLockMs: z.natural(),

@@ -8,8 +8,9 @@
  * @module dsh-web3-core/provider
  */
 
-import { FetchRequest, JsonRpcProvider, Network, formatEther, formatUnits, type Provider } from 'ethers';
+import { FetchRequest, JsonRpcProvider, Network, formatEther, formatUnits, toQuantity, type Provider } from 'ethers';
 import { getChain, type ChainInfo } from './chains.js';
+import { SimulationUnsupportedError, type SimulationResult } from './simulate.js';
 
 /** EIP-1559 / legacy fee information. */
 export interface FeeData {
@@ -42,6 +43,12 @@ export interface ChainProvider {
   waitForTransaction(hash: string, timeoutMs?: number): Promise<TxReceipt>;
   /** Resolve an ENS name to an address (mainnet providers); null when unset. */
   resolveName?(name: string): Promise<string | null>;
+  /**
+   * Simulate one call against the latest block (`eth_simulateV1` with
+   * `traceTransfers`). Throws {@link SimulationUnsupportedError} when the
+   * endpoint lacks the method.
+   */
+  simulate?(call: { from: string; to: string; value: bigint; data: string; gas?: bigint }, signal?: AbortSignal): Promise<SimulationResult>;
   /** Underlying ethers provider, when one exists (exposed for advanced use). */
   readonly ethersProvider?: Provider;
 }
@@ -136,6 +143,49 @@ export class JsonRpcChainProvider implements ChainProvider {
     return await this.ethersProvider.getTransactionCount(address, 'pending');
   }
 
+  async simulate(call: { from: string; to: string; value: bigint; data: string; gas?: bigint }): Promise<SimulationResult> {
+    const params = [
+      {
+        blockStateCalls: [
+          {
+            calls: [
+              {
+                from: call.from,
+                to: call.to,
+                value: toQuantity(call.value),
+                data: call.data,
+                ...(call.gas !== undefined ? { gas: toQuantity(call.gas) } : {}),
+              },
+            ],
+          },
+        ],
+        traceTransfers: true,
+        validation: false,
+      },
+      'latest',
+    ];
+    let result: unknown;
+    try {
+      result = await this.ethersProvider.send('eth_simulateV1', params);
+    } catch (error) {
+      if (isMethodMissing(error)) throw new SimulationUnsupportedError();
+      throw error;
+    }
+    const block = Array.isArray(result) ? (result[0] as { calls?: unknown[] } | undefined) : undefined;
+    const first = block?.calls?.[0] as
+      | { status?: string; error?: { message?: string }; gasUsed?: string; logs?: Array<{ address?: string; topics?: string[]; data?: string }> }
+      | undefined;
+    if (first === undefined) throw new Error('eth_simulateV1 returned no call result');
+    return {
+      status: first.status === '0x1' ? 'success' : 'reverted',
+      ...(first.error?.message !== undefined ? { error: first.error.message } : {}),
+      ...(typeof first.gasUsed === 'string' ? { gasUsed: BigInt(first.gasUsed) } : {}),
+      logs: (first.logs ?? [])
+        .filter((log) => typeof log.address === 'string' && Array.isArray(log.topics))
+        .map((log) => ({ address: log.address!, topics: log.topics!, data: log.data ?? '0x' })),
+    };
+  }
+
   async getCode(address: string): Promise<string> {
     return await this.ethersProvider.getCode(address);
   }
@@ -190,6 +240,14 @@ export class JsonRpcChainProvider implements ChainProvider {
     if (receipt === null) throw new Error(`transaction ${hash} not mined within ${String(timeoutMs)} ms`);
     return toReceipt(receipt);
   }
+}
+
+/** Whether an RPC error means "this endpoint does not implement the method". */
+function isMethodMissing(error: unknown): boolean {
+  const inner = (error as { error?: { code?: number; message?: string } })?.error;
+  if (inner?.code === -32601) return true;
+  const text = `${inner?.message ?? ''} ${error instanceof Error ? error.message : String(error)}`.toLowerCase();
+  return /method not found|does not exist|not supported|unsupported method|method not allowed|not available|unknown method/.test(text);
 }
 
 function toReceipt(receipt: {

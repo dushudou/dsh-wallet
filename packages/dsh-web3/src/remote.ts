@@ -119,7 +119,53 @@ export class Web3Remote extends TypertRemoteService {
       ...this.service.limitsView(),
       contacts: this.service.addressBookList(),
       settings: this.service.settingsView(),
+      security: this.service.securityView(),
     };
+  }
+
+  /** Replace the security check settings. Weakening any check requires `pin`. */
+  async securitySet(request: unknown) {
+    const query = (request ?? {}) as { settings?: unknown; pin?: string };
+    try {
+      await this.service.setSecuritySettingsFromPanel(query.settings, text(query.pin));
+      return { ok: true, ...this.service.securityView() };
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
+  /** Add an address to the denylist (tightens: no PIN). */
+  async denylistAdd(request: unknown) {
+    const query = (request ?? {}) as { address?: string; label?: string; note?: string };
+    try {
+      if (typeof query.address !== 'string') throw new WalletError('INVALID_ARGUMENT', 'address is required');
+      await this.service.denylistAdd({ address: query.address.trim(), ...(text(query.label) !== undefined ? { label: text(query.label)! } : {}), ...(text(query.note) !== undefined ? { note: text(query.note)! } : {}) }, 'panel');
+      return { ok: true, ...this.service.securityView() };
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
+  /** Remove an address from the denylist (loosens: PIN step-up). */
+  async denylistRemove(request: unknown) {
+    const query = (request ?? {}) as { address?: string; pin?: string };
+    try {
+      if (typeof query.address !== 'string') throw new WalletError('INVALID_ARGUMENT', 'address is required');
+      await this.service.denylistRemoveFromPanel(query.address, text(query.pin));
+      return { ok: true, ...this.service.securityView() };
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
+  /** Re-download the enabled denylist feeds now. */
+  async denylistRefresh(request: unknown) {
+    try {
+      await this.service.refreshDenylistFeeds({ force: true });
+      return { ok: true, ...this.service.securityView() };
+    } catch (error) {
+      return failure(error);
+    }
   }
 
   /** Unlock the vault (passphrase resolves from the credentials store / env). */
@@ -461,6 +507,10 @@ for (const method of [
   'lock',
   'limitsSet',
   'policyPreset',
+  'securitySet',
+  'denylistAdd',
+  'denylistRemove',
+  'denylistRefresh',
   'contactUpsert',
   'contactTrust',
   'contactRemove',

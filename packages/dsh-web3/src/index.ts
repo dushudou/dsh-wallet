@@ -68,7 +68,7 @@ function resolveConfig(raw: PluginConfigValue): ResolvedConfig {
  * - id: wallet
  *   name: 'dsh-web3'
  *   config:
- *     vaultPath: ~/.dsh/wallet
+ *     vaultPath: ~/.dsh-web3
  *     passphrase:
  *       mode: auto
  * ```
@@ -124,6 +124,24 @@ export function applyWalletPlugin(ctx: Context, rawConfig: PluginConfigValue): (
     const dispose = ctx.provide('wallet', service);
     disposers.push(dispose);
     logger.info('wallet service mounted at ctx.wallet');
+  });
+
+  // Keep the public denylists (OFAC, ScamSniffer) fresh: refresh stale feeds
+  // at startup and check every 6 hours (each feed re-downloads once a day).
+  // Lookups only ever read the local cache. `DSH_WEB3_DENYLIST_REFRESH=off`
+  // disables the downloads (offline machines, tests).
+  if (process.env.DSH_WEB3_DENYLIST_REFRESH !== 'off') servicePromise.then((service) => {
+    const refresh = () =>
+      service
+        .refreshDenylistFeeds()
+        .then((feeds) => {
+          for (const feed of feeds) if (feed.error !== undefined) logger.warn(`denylist feed ${feed.id}: ${feed.error}`);
+        })
+        .catch((error: unknown) => logger.warn(`denylist refresh failed: ${error instanceof Error ? error.message : String(error)}`));
+    void refresh();
+    const timer = setInterval(() => void refresh(), 6 * 60 * 60 * 1000);
+    timer.unref?.();
+    disposers.push(() => clearInterval(timer));
   });
 
   // Register model tools on the DSH ToolRuntime (`ctx.tools`), which feeds the

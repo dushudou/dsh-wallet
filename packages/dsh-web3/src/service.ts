@@ -7,10 +7,12 @@
  *
  * ```text
  * prepare  resolve recipient/token/amount → populate → decode intent →
- *          preflight (balance, revert, look-alike …) → policy dry-run
+ *          preflight (balance, revert) → policy dry-run → security checks
+ *          (denylist, sanctions, simulation, look-alikes …) → escalate
  *          → returns a single-use preparedId + human summary
- * execute  (per-account lock) re-populate fees/nonce → policy → PIN gate
- *          → human approval (when `ask`) → sign → journal → broadcast
+ * execute  (per-account lock) re-populate fees/nonce → policy → security
+ *          re-check → PIN gate → human approval (when `ask`) → sign →
+ *          journal → broadcast
  * ```
  *
  * so what the user reviewed is exactly what gets signed, retries are safe
@@ -48,6 +50,22 @@ import {
   signTypedData as coreSignTypedData,
   describeTransaction,
   assertNoSecrets,
+  escalateDecision,
+  finding,
+  isTighteningSecurity,
+  normalizeSecuritySettings,
+  runSecurityChecks,
+  severityMark,
+  severityRank,
+  validateSecuritySettings,
+  type CheckRun,
+  type DenylistEntry,
+  type FeedFetcher,
+  type RiskFinding,
+  type RiskSeverity,
+  type SecuritySettings,
+  type SecuritySubject,
+  type SimulationSummary,
   checkLimits,
   detectPreset,
   intentOf,
@@ -71,6 +89,7 @@ import {
   type TransactionRequestInput,
 } from 'dsh-web3-core';
 import { WalletError, isDefinitiveRejection } from './errors.js';
+import { buildRiskChecks, type JsonFetcher, type SecurityDeps, type SecurityHints } from './security.js';
 import {
   formatAmount,
   lookAlikeOf,
@@ -114,6 +133,17 @@ export interface CallContext {
   agent?: unknown;
 }
 
+/** Security checks for one operation (see dsh-web3/security). */
+export interface SecurityView {
+  /** Strongest finding, or `none`. */
+  severity: RiskSeverity | 'none';
+  /** Findings, strongest first. */
+  findings: RiskFinding[];
+  checks: CheckRun[];
+  /** Decoded simulation (transactions on RPCs that support eth_simulateV1). */
+  simulation?: SimulationSummary;
+}
+
 /** What `sendTransaction` / `executePrepared` did and produced. */
 export interface SendResult {
   status:
@@ -138,6 +168,8 @@ export interface SendResult {
   /** Suggested next step for an agent. */
   next?: string;
   error?: string;
+  /** Security checks run right before signing. */
+  security?: SecurityView;
 }
 
 /** What message signing did and produced. */
@@ -148,6 +180,7 @@ export interface SignMessageResult {
   signature?: string;
   address: string;
   intent?: Intent;
+  security?: SecurityView;
 }
 
 /** The dry-run view of a prepared operation (what the model shows the user). */
@@ -166,7 +199,10 @@ export interface PreparedView {
   fee: { gasLimit: string; maxFee: string };
   decision: PolicyDecision;
   willRequire: { humanApproval: boolean; dailyPin: boolean; blocked: boolean };
+  /** Every finding as one line (strongest first); kept for older callers. */
   warnings: string[];
+  /** Structured security findings, simulation, and per-check status. */
+  security: SecurityView;
   human: ReturnType<typeof describeTransaction>;
   next: string;
 }
@@ -189,6 +225,10 @@ export interface WalletServiceOptions {
   keychain?: SecretStore;
   /** Mirrors the `unsafeAllowModelSecretReveal` plugin flag (shown read-only in the panel). */
   allowModelSecretReveal?: boolean;
+  /** GoPlus fetch override (tests). */
+  fetchJson?: JsonFetcher;
+  /** Denylist feed download override (tests). */
+  feedFetcher?: FeedFetcher;
 }
 
 /** A prepared, not-yet-executed operation. */
@@ -202,7 +242,11 @@ interface Plan {
   asset?: ResolvedAsset;
   recipient?: ResolvedRecipient;
   headline: string;
-  warnings: string[];
+  /** Pipeline notes ("max", unverified decimals …) folded into every report. */
+  notes: RiskFinding[];
+  /** Latest security report and when it ran. */
+  security: SecurityView;
+  securityAt: number;
   idempotencyKey?: string;
   /** Hash of the transaction this plan replaces (speed-up / cancel). */
   replaces?: string;
@@ -210,6 +254,8 @@ interface Plan {
 }
 
 const PREPARED_TTL_MS = 15 * 60_000;
+/** A security report this fresh is reused at execution (one-shot transfers). */
+const SECURITY_REUSE_MS = 30_000;
 /** Minimum fee bump for a replacement transaction (geth requires +10%). */
 const REPLACEMENT_BUMP_PERCENT = 15n;
 
@@ -229,6 +275,8 @@ export class WalletService {
   private plans = new Map<string, Plan>();
   /** Per-account execution chain: serializes nonce assignment. */
   private accountLocks = new Map<string, Promise<unknown>>();
+  /** TTL cache for network security lookups (sanctions oracle, GoPlus). */
+  private securityCache = new Map<string, { at: number; value: unknown }>();
 
   constructor(vault: WalletVault, options: WalletServiceOptions) {
     this.vault = vault;
@@ -591,7 +639,7 @@ export class WalletService {
     const recipient = await this.recipientFor(input.to, chainId);
     const asset = await resolveAsset(provider, chainId, input.token, this.tokensFor(chainId));
     const isMax = String(input.amount).trim().toLowerCase() === 'max';
-    const warnings: string[] = [];
+    const notes: RiskFinding[] = [];
 
     let request: Plan['request'];
     if (asset.kind === 'native') {
@@ -612,7 +660,7 @@ export class WalletService {
           ...(probe.maxFeePerGas !== undefined ? { maxFeePerGas: probe.maxFeePerGas, maxPriorityFeePerGas: probe.maxPriorityFeePerGas } : {}),
           ...(probe.gasPrice !== undefined ? { gasPrice: probe.gasPrice, type: 0 as const } : {}),
         });
-        warnings.push(`"max" sends the whole balance minus the network fee (${formatAmount(value, asset.decimals, asset.symbol)})`);
+        notes.push(finding('prepare', 'MAX_AMOUNT', 'info', `"max" sends the whole balance minus the network fee (${formatAmount(value, asset.decimals, asset.symbol)})`));
       } else {
         value = parseAmount(input.amount, asset.decimals, asset.symbol);
       }
@@ -630,13 +678,12 @@ export class WalletService {
         amount = parseAmount(input.amount, asset.decimals, asset.symbol);
       }
       request = { to: asset.address, value: 0n, data: encodeErc20Transfer(recipient.address, amount) };
-      if (!asset.verified) warnings.push(`could not verify ${asset.symbol} decimals on-chain; using ${asset.source} metadata (${String(asset.decimals)})`);
-      if (findKnownToken(chainId, recipient.address) !== undefined) {
-        warnings.push(`recipient ${recipient.address} is itself a token contract — tokens sent there are usually lost`);
+      if (!asset.verified) {
+        notes.push(finding('prepare', 'UNVERIFIED_DECIMALS', 'warn', `could not verify ${asset.symbol} decimals on-chain; using ${asset.source} metadata (${String(asset.decimals)})`, asset.address));
       }
     }
 
-    return await this.plan({ account, chainId, request, asset, recipient, warnings, idempotencyKey: input.idempotencyKey });
+    return await this.plan({ account, chainId, request, asset, recipient, notes, idempotencyKey: input.idempotencyKey });
   }
 
   /** Prepare an ERC-20 approval (`amount`: decimal, "0" to revoke, or "unlimited"). */
@@ -650,14 +697,13 @@ export class WalletService {
     const spender = await this.recipientFor(input.spender, chainId);
     const raw = String(input.amount).trim().toLowerCase();
     const amount = raw === 'unlimited' ? MaxUint256 : raw === '0' ? 0n : parseAmount(input.amount, asset.decimals, asset.symbol);
-    const warnings = amount === MaxUint256 ? ['UNLIMITED approval: the spender can take the entire balance of this token, now and in the future'] : [];
     return await this.plan({
       account,
       chainId,
       request: { to: asset.address, value: 0n, data: encodeErc20Approve(spender.address, amount) },
       asset,
       recipient: spender,
-      warnings,
+      notes: [],
     });
   }
 
@@ -686,7 +732,7 @@ export class WalletService {
         ...(input.gasLimit !== undefined ? { gasLimit: input.gasLimit } : {}),
       },
       recipient,
-      warnings: [],
+      notes: [],
       idempotencyKey: input.idempotencyKey,
     });
   }
@@ -698,7 +744,7 @@ export class WalletService {
     request: Plan['request'];
     asset?: ResolvedAsset;
     recipient?: ResolvedRecipient;
-    warnings: string[];
+    notes: RiskFinding[];
     idempotencyKey?: string;
     replaces?: string;
   }): Promise<PreparedView> {
@@ -706,12 +752,16 @@ export class WalletService {
     const { provider } = await this.providerFor(input.chainId);
     const populated = await populateTransaction({ ...input.request, from: input.account.address, chainId: input.chainId }, provider);
     const intent = classifyTransaction({ to: populated.to, value: populated.value, data: populated.data });
-    const decision = this.evaluate(input.account, input.chainId, populated, intent);
-    // A policy denial is the most useful answer; skip preflight noise for it.
-    const warnings =
-      decision.effect === 'deny'
-        ? [...input.warnings]
-        : [...input.warnings, ...(await this.preflight(provider, input.account, populated, intent, input.recipient, input.asset))];
+    const policyDecision = this.evaluate(input.account, input.chainId, populated, intent);
+    // A policy denial is the most useful answer; skip preflight and checks for it.
+    let security: SecurityView;
+    if (policyDecision.effect === 'deny') {
+      security = notesOnly(input.notes);
+    } else {
+      const notes = [...input.notes, ...(await this.preflight(provider, input.account, populated, intent, input.asset))];
+      security = await this.assess(this.txSubject(input.account, input.chainId, populated, intent), { ...(input.recipient !== undefined ? { recipient: input.recipient } : {}) }, notes);
+    }
+    const decision = escalateDecision(policyDecision, security);
     const plan: Plan = {
       id: `prep_${randomUUID()}`,
       expiresAt: Date.now() + PREPARED_TTL_MS,
@@ -722,7 +772,9 @@ export class WalletService {
       ...(input.asset !== undefined ? { asset: input.asset } : {}),
       ...(input.recipient !== undefined ? { recipient: input.recipient } : {}),
       headline: headlineFor(intent, populated, input.chainId, input.asset, input.recipient),
-      warnings,
+      notes: input.notes,
+      security,
+      securityAt: Date.now(),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
     };
@@ -730,16 +782,19 @@ export class WalletService {
     return await this.viewOf(plan, populated, decision);
   }
 
-  /** Checks that turn silent losses into explicit errors or warnings. */
+  /**
+   * Hard preflight: failures that make signing pointless (would revert, not
+   * enough funds) throw; soft issues come back as notes for the report.
+   * Counterparty risk is the job of the security checks.
+   */
   private async preflight(
     provider: ChainProvider,
     account: AccountMeta,
     populated: PopulatedTransaction,
     intent: Intent,
-    recipient: ResolvedRecipient | undefined,
     asset: ResolvedAsset | undefined,
-  ): Promise<string[]> {
-    const warnings: string[] = [];
+  ): Promise<RiskFinding[]> {
+    const notes: RiskFinding[] = [];
     if (populated.estimateError !== undefined) {
       throw new WalletError(
         'WOULD_REVERT',
@@ -761,7 +816,7 @@ export class WalletService {
     }
     if (intent.kind === 'token-transfer' && asset?.kind === 'erc20' && intent.amount !== undefined) {
       const balance = await tokenBalanceOf(provider, asset.address, account.address);
-      if (balance === undefined) warnings.push(`could not read the ${asset.symbol} balance; the transfer may fail`);
+      if (balance === undefined) notes.push(finding('prepare', 'BALANCE_UNKNOWN', 'warn', `could not read the ${asset.symbol} balance; the transfer may fail`, asset.address));
       else if (balance < BigInt(intent.amount)) {
         throw new WalletError(
           'INSUFFICIENT_FUNDS',
@@ -770,25 +825,53 @@ export class WalletService {
         );
       }
     }
-    const counterparty = intent.recipient ?? (intent.kind === 'native-transfer' ? populated.to : undefined);
-    if (counterparty !== undefined) {
-      if (counterparty.toLowerCase() === account.address.toLowerCase()) warnings.push('sending to your own address (this account)');
-      const known = this.knownCounterparties(account.address);
-      const lookAlike = lookAlikeOf(counterparty, known);
-      if (lookAlike !== undefined) {
-        warnings.push(
-          `ADDRESS POISONING RISK: ${counterparty} looks like known address ${lookAlike} (same first/last characters) but is different — confirm every character with the user`,
-        );
-      }
-      const trusted = recipient?.via === 'address-book' || recipient?.via === 'own-account';
-      if (!trusted && !known.has(counterparty.toLowerCase())) warnings.push(`first transfer to ${counterparty} — confirm the full address with the user`);
-      if (recipient?.via === 'ens') warnings.push(`recipient resolved from ENS name ${recipient.label ?? ''} → ${recipient.address}`);
-      if (intent.kind === 'native-transfer') {
-        const code = await provider.getCode(counterparty).catch(() => '0x');
-        if (code !== '0x' && code !== '') warnings.push(`recipient ${counterparty} is a contract; make sure it can receive ${symbol}`);
-      }
-    }
-    return warnings;
+    return notes;
+  }
+
+  // ── security checks ─────────────────────────────────────────────────────
+
+  private securityDeps(): SecurityDeps {
+    return {
+      settings: () => this.vault.getSecuritySettings(),
+      providerFor: async (chainId) => (await this.providerFor(chainId)).provider,
+      denylist: this.vault.denylist,
+      knownCounterparties: (from) => this.knownCounterparties(from),
+      isOwnAccount: (address) => this.isOwnAccount(address),
+      isTrustedContact: (address) => this.vault.addressBook.isTrusted(address),
+      ...(this.options.fetchJson !== undefined ? { fetchJson: this.options.fetchJson } : {}),
+      cache: this.securityCache,
+    };
+  }
+
+  private isOwnAccount(address: string): boolean {
+    const lower = address.toLowerCase();
+    return this.vault.listAccounts().some((meta) => meta.address.toLowerCase() === lower);
+  }
+
+  /** Run every enabled check for one operation. */
+  private async assess(subject: SecuritySubject, hints: SecurityHints, notes: RiskFinding[]): Promise<SecurityView> {
+    const built = buildRiskChecks(this.securityDeps(), subject, hints);
+    const report = await runSecurityChecks(built.checks, subject, { onUnavailable: this.vault.getSecuritySettings().onUnavailable, extraFindings: notes });
+    // The simulation promise is settled once its check finished; never wait on a timed-out one.
+    const simulation = await Promise.race([built.simulation(), Promise.resolve(undefined)]);
+    return { ...report, ...(simulation !== undefined ? { simulation } : {}) };
+  }
+
+  /** The security subject of a populated transaction. */
+  private txSubject(account: AccountMeta, chainId: number, populated: PopulatedTransaction, intent: Intent): SecuritySubject {
+    const counterparties: SecuritySubject['counterparties'] = [];
+    const recipient = intent.recipient ?? (intent.kind === 'native-transfer' ? populated.to : undefined);
+    if (recipient !== undefined) counterparties.push({ role: 'recipient', address: recipient });
+    if (intent.spender !== undefined) counterparties.push({ role: 'spender', address: intent.spender });
+    if (intent.kind !== 'native-transfer') counterparties.push({ role: 'contract', address: populated.to });
+    return {
+      kind: 'transaction',
+      chainId,
+      from: account.address,
+      intent,
+      tx: { to: populated.to, value: populated.value, data: populated.data, gasLimit: populated.gasLimit },
+      counterparties,
+    };
   }
 
   /** Lower-cased addresses the user has dealt with (address book, own accounts, past recipients). */
@@ -828,6 +911,7 @@ export class WalletService {
   }
 
   private async viewOf(plan: Plan, populated: PopulatedTransaction, decision: PolicyDecision): Promise<PreparedView> {
+    const security = plan.security;
     const human = describeTransaction(populated);
     const chain = getChain(plan.chainId);
     const maxFee = populated.gasLimit * (populated.maxFeePerGas ?? populated.gasPrice ?? 0n);
@@ -853,11 +937,13 @@ export class WalletService {
       fee: { gasLimit: populated.gasLimit.toString(), maxFee: `${formatEther(maxFee)} ${chain?.symbol ?? 'ETH'}` },
       decision,
       willRequire,
-      warnings: plan.warnings,
+      warnings: warningLines(security.findings),
+      security,
       human,
       next: willRequire.blocked
-        ? 'Blocked by the signing policy. Explain the policy reason to the user; do not try to work around it.'
-        : `Show the user the summary${plan.warnings.length > 0 ? ' AND every warning' : ''}, get explicit confirmation, then call wallet_send_transaction with { preparedId: "${plan.id}" }.` +
+        ? blockedNext(decision)
+        : `Show the user the summary${security.findings.length > 0 ? ' AND every security finding' : ''}, get explicit confirmation, then call wallet_send_transaction with { preparedId: "${plan.id}" }.` +
+          (severityRank(security.severity) >= severityRank('high') ? ' There are HIGH-risk findings: relay each one to the user word for word and let the user decide; never dismiss them yourself.' : '') +
           (willRequire.dailyPin ? ' The user must first unlock today\'s PIN in DSH Settings → Web3.' : '') +
           (willRequire.humanApproval ? ' A human approval prompt will appear when executing.' : ''),
     };
@@ -909,7 +995,17 @@ export class WalletService {
       throw new WalletError('WOULD_REVERT', `the transaction would now fail on-chain: ${populated.estimateError}`, 'Nothing was signed. Chain state changed since preparing; re-check with the user.');
     }
     const human = describeTransaction(populated);
-    const decision = this.evaluate(account, plan.chainId, populated, plan.intent);
+    // Re-check right before signing unless the prepare-time report is seconds old.
+    if (Date.now() - plan.securityAt > SECURITY_REUSE_MS) {
+      plan.security = await this.assess(
+        this.txSubject(account, plan.chainId, populated, plan.intent),
+        { ...(plan.recipient !== undefined ? { recipient: plan.recipient } : {}) },
+        plan.notes,
+      );
+      plan.securityAt = Date.now();
+    }
+    const security = plan.security;
+    const decision = escalateDecision(this.evaluate(account, plan.chainId, populated, plan.intent), security);
     await this.vault.auditAppend('sign.decision', {
       type: 'signTransaction',
       accountId: account.id,
@@ -923,23 +1019,24 @@ export class WalletService {
       to: populated.to,
       valueWei: populated.value.toString(),
       intent: plan.intent.kind,
+      risk: decision.risk,
     });
 
     if (decision.effect === 'deny') {
-      return (plan.result = { status: 'denied-by-policy', decision, summary: plan.headline, next: 'Blocked by policy; explain the reason to the user. Do not work around it.' });
+      return (plan.result = { status: 'denied-by-policy', decision, summary: plan.headline, security, next: blockedNext(decision) });
     }
     // Lock + PIN before approval: never ask the human to approve something
     // the vault lock or the daily PIN gate would then refuse.
     this.requireUnlocked();
     await this.pinGate();
     if (decision.effect === 'ask') {
-      if (approval === undefined) return (plan.result = { status: 'unavailable-approver', decision, summary: plan.headline });
+      if (approval === undefined) return (plan.result = { status: 'unavailable-approver', decision, summary: plan.headline, security });
       const outcome = await approval.request({
         toolName: context.toolName,
         callId: context.callId,
         signal: context.signal,
         agent: context.agent,
-        reason: approvalTextFor(plan, populated, decision),
+        reason: approvalTextFor(plan, populated, decision, security.findings),
       });
       await this.vault.auditAppend('sign.approval', { outcome, accountId: account.id, address: account.address });
       if (outcome !== 'allowed-once') {
@@ -948,6 +1045,7 @@ export class WalletService {
           decision,
           approvalOutcome: outcome,
           summary: plan.headline,
+          security,
           next: 'The user did not approve. Do not retry unless the user asks again.',
         });
       }
@@ -1010,6 +1108,7 @@ export class WalletService {
       human,
       summary: plan.headline,
       explorerUrl: explorerUrl(plan.chainId, 'tx', signed.hash),
+      security,
       next: 'Broadcast. Report the txHash/explorer link; use wallet_tx_status to confirm it was mined.',
     };
     // Defense in depth: never let key material ride along in results.
@@ -1180,7 +1279,7 @@ export class WalletService {
       account,
       chainId: entry.chainId,
       request,
-      warnings: [input.action === 'cancel' ? `cancels ${entry.hash} (0-value self-send with the same nonce)` : `speeds up ${entry.hash} with a higher fee`],
+      notes: [finding('prepare', 'REPLACEMENT', 'info', input.action === 'cancel' ? `cancels ${entry.hash} (0-value self-send with the same nonce)` : `speeds up ${entry.hash} with a higher fee`)],
       replaces: entry.hash,
     });
     return await this.executePrepared(prepared.preparedId, approval, context);
@@ -1246,6 +1345,8 @@ export class WalletService {
       value: Record<string, unknown>;
       /** Optional human context shown in the approval prompt (e.g. the paid resource). */
       purpose?: string;
+      /** Extra findings from the caller (e.g. x402 asset checks). Not a tool parameter. */
+      extraFindings?: RiskFinding[];
     },
     approval: ApprovalGateway | undefined,
     context: CallContext = { toolName: 'wallet_sign_typed_data' },
@@ -1260,7 +1361,7 @@ export class WalletService {
     const domain: TypedDataDomain = { ...input.domain, ...(chainId !== undefined ? { chainId } : {}) };
     const intent = classifyTypedData({ domain, types, value: input.value });
     const typedDataJson = JSON.stringify({ domain, types, value: input.value }, (_key, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
-    const decision = this.decide({
+    const policyDecision = this.decide({
       type: 'signTypedData',
       account: { address: meta.address },
       ...(chainId !== undefined ? { chainId } : {}),
@@ -1268,6 +1369,11 @@ export class WalletService {
       typedData: typedDataJson,
       intent,
     });
+    const security =
+      policyDecision.effect === 'deny'
+        ? notesOnly(input.extraFindings ?? [])
+        : await this.assess(this.typedDataSubject(meta, chainId, domain, intent), {}, input.extraFindings ?? []);
+    const decision = escalateDecision(policyDecision, security);
     await this.vault.auditAppend('sign.decision', {
       type: 'signTypedData',
       accountId: meta.id,
@@ -1279,22 +1385,23 @@ export class WalletService {
       reason: decision.reason,
       verifyingContract: domain.verifyingContract,
       intent: intent.kind,
+      risk: decision.risk,
     });
-    if (decision.effect === 'deny') return { status: 'denied-by-policy', decision, address: meta.address, intent };
+    if (decision.effect === 'deny') return { status: 'denied-by-policy', decision, address: meta.address, intent, security };
     this.requireUnlocked();
     await this.pinGate();
     if (decision.effect === 'ask') {
-      if (approval === undefined) return { status: 'unavailable-approver', decision, address: meta.address, intent };
+      if (approval === undefined) return { status: 'unavailable-approver', decision, address: meta.address, intent, security };
       const outcome = await approval.request({
         toolName: context.toolName,
         callId: context.callId,
         signal: context.signal,
         agent: context.agent,
-        reason: typedDataApprovalText(meta, domain, intent, typedDataJson, decision, input.purpose),
+        reason: typedDataApprovalText(meta, domain, intent, typedDataJson, decision, input.purpose, security.findings),
       });
       await this.vault.auditAppend('sign.approval', { outcome, accountId: meta.id, address: meta.address });
       if (outcome !== 'allowed-once') {
-        return { status: 'awaiting-approval-rejected', decision, approvalOutcome: outcome, address: meta.address, intent };
+        return { status: 'awaiting-approval-rejected', decision, approvalOutcome: outcome, address: meta.address, intent, security };
       }
     }
     this.requireUnlocked();
@@ -1305,9 +1412,20 @@ export class WalletService {
     if (intent.kind === 'transfer-authorization' && intent.token !== undefined && intent.amount !== undefined && intent.recipient !== undefined && chainId !== undefined) {
       await this.vault.recordSignedAuthorization({ account: meta, chainId, token: intent.token, tokenAmount: intent.amount, recipient: intent.recipient });
     }
-    const result: SignMessageResult = { status: 'signed', decision, signature, address: meta.address, intent };
+    const result: SignMessageResult = { status: 'signed', decision, signature, address: meta.address, intent, security };
     assertNoSecrets(result, [account.reveal().privateKey]);
     return result;
+  }
+
+  /** The security subject of an EIP-712 signature. */
+  private typedDataSubject(meta: AccountMeta, chainId: number | undefined, domain: TypedDataDomain, intent: Intent): SecuritySubject {
+    const counterparties: SecuritySubject['counterparties'] = [];
+    if (intent.recipient !== undefined) counterparties.push({ role: 'recipient', address: intent.recipient });
+    if (intent.spender !== undefined) counterparties.push({ role: 'spender', address: intent.spender });
+    if (typeof domain.verifyingContract === 'string' && /^0x[0-9a-fA-F]{40}$/.test(domain.verifyingContract)) {
+      counterparties.push({ role: 'verifying-contract', address: getAddress(domain.verifyingContract.toLowerCase()) });
+    }
+    return { kind: 'typed-data', ...(chainId !== undefined ? { chainId } : {}), from: meta.address, intent, counterparties };
   }
 
   // ── x402 payment authorization ─────────────────────────────────────────
@@ -1325,8 +1443,8 @@ export class WalletService {
     approval: ApprovalGateway | undefined,
     context: Partial<CallContext> = {},
   ): Promise<
-    | { status: 'signed'; signature: string; authorization: { from: string; to: string; value: string; validAfter: number; validBefore: number; nonce: string }; payTo: string; asset: string; chainId: number; amount: string; amountFormatted?: string; expiresAt: number; resource?: string; decision: PolicyDecision; address: string; x402Version: number; scheme: 'exact'; network: string }
-    | { status: 'awaiting-approval-rejected' | 'denied-by-policy' | 'unavailable-approver'; decision: PolicyDecision; address: string }
+    | { status: 'signed'; signature: string; authorization: { from: string; to: string; value: string; validAfter: number; validBefore: number; nonce: string }; payTo: string; asset: string; chainId: number; amount: string; amountFormatted?: string; expiresAt: number; resource?: string; decision: PolicyDecision; address: string; x402Version: number; scheme: 'exact'; network: string; security?: SecurityView }
+    | { status: 'awaiting-approval-rejected' | 'denied-by-policy' | 'unavailable-approver'; decision: PolicyDecision; address: string; security?: SecurityView }
   > {
     const challenge = normalizeX402Challenge(input.challenge);
     const chainId = resolveX402ChainId(challenge);
@@ -1372,13 +1490,17 @@ export class WalletService {
     ]
       .filter((part) => part !== undefined)
       .join(' ');
+    const extraFindings =
+      known === undefined
+        ? [finding('x402', 'X402_UNKNOWN_ASSET', 'warn', `the payment asset ${asset} is not a token this wallet knows on chain ${String(chainId)}; x402 normally uses USDC`, asset)]
+        : [];
     const result = await this.signTypedData(
-      { account: input.account, domain, types, value: authorization, purpose },
+      { account: input.account, domain, types, value: authorization, purpose, extraFindings },
       approval,
       { ...context, toolName: context.toolName ?? 'wallet_x402_authorize' },
     );
     if (result.status !== 'signed') {
-      return { status: result.status, decision: result.decision, address: result.address };
+      return { status: result.status, decision: result.decision, address: result.address, ...(result.security !== undefined ? { security: result.security } : {}) };
     }
     return {
       status: 'signed',
@@ -1396,6 +1518,7 @@ export class WalletService {
       x402Version: challenge.x402Version,
       scheme: 'exact',
       network: challenge.network ?? `eip155:${String(chainId)}`,
+      ...(result.security !== undefined ? { security: result.security } : {}),
     };
   }
 
@@ -1458,6 +1581,101 @@ export class WalletService {
       usage: limitUsage(limits, this.vault.spend.windowEvents()),
       whitelist: this.vault.addressBook.list().filter((entry) => entry.trusted === true),
     };
+  }
+
+  // ── security settings, denylist, address checks ─────────────────────────
+
+  /** Security settings, feed status, and the user denylist (secret-free). */
+  securityView(): { settings: SecuritySettings; feeds: ReturnType<WalletVault['denylist']['feedStatus']>; denylist: DenylistEntry[] } {
+    return { settings: this.vault.getSecuritySettings(), feeds: this.vault.denylist.feedStatus(), denylist: this.vault.denylist.list() };
+  }
+
+  /** Replace the security settings from the panel. Weakening any check requires `pin`. */
+  async setSecuritySettingsFromPanel(next: unknown, pin?: string): Promise<SecuritySettings> {
+    const errors = validateSecuritySettings(next);
+    if (errors.length > 0) throw new WalletError('INVALID_ARGUMENT', `invalid security settings: ${errors.join('; ')}`);
+    const current = this.vault.getSecuritySettings();
+    const normalized = normalizeSecuritySettings(next);
+    const tightening = isTighteningSecurity(current, normalized);
+    if (!tightening) await this.stepUp(pin, 'weaken the transaction security checks');
+    const saved = await this.vault.setSecuritySettings(normalized);
+    await this.vault.auditAppend('security.settings', { tightening, simulation: saved.simulation, sanctionsOracle: saved.sanctionsOracle, goplus: saved.goplus, onUnavailable: saved.onUnavailable, feeds: saved.feeds });
+    // Newly enabled feeds download in the background.
+    if (Object.entries(saved.feeds).some(([id, on]) => on && !current.feeds[id as keyof SecuritySettings['feeds']])) {
+      void this.refreshDenylistFeeds().catch(() => undefined);
+    }
+    return saved;
+  }
+
+  /** Add an address to the denylist. Always tightens, so the agent may call it. */
+  async denylistAdd(input: { address: string; label?: string; note?: string }, actor: 'agent' | 'panel'): Promise<DenylistEntry> {
+    let entry: DenylistEntry;
+    try {
+      entry = await this.vault.denylist.add(input);
+    } catch (error) {
+      throw new WalletError('INVALID_ADDRESS', error instanceof Error ? error.message : String(error), 'Pass a full, checksummed 0x address.');
+    }
+    await this.vault.auditAppend('denylist.add', { address: entry.address, label: entry.label, actor });
+    return entry;
+  }
+
+  /** Remove an address from the denylist (panel only; loosens, so PIN step-up). */
+  async denylistRemoveFromPanel(address: string, pin?: string): Promise<DenylistEntry | undefined> {
+    await this.stepUp(pin, 'remove an address from the denylist');
+    const removed = await this.vault.denylist.remove(address);
+    if (removed !== undefined) await this.vault.auditAppend('denylist.remove', { address: removed.address });
+    return removed;
+  }
+
+  /** Download stale (or, with `force`, all) enabled denylist feeds. */
+  async refreshDenylistFeeds(options: { force?: boolean } = {}): Promise<ReturnType<WalletVault['denylist']['feedStatus']>> {
+    const settings = this.vault.getSecuritySettings();
+    const status = await this.vault.denylist.refreshFeeds({
+      enabled: settings.feeds,
+      ...(this.options.feedFetcher !== undefined ? { fetcher: this.options.feedFetcher } : {}),
+      ...(options.force === true ? { force: true } : {}),
+    });
+    return status;
+  }
+
+  /**
+   * Check one address before paying it: denylist, sanctions oracle, look-alikes
+   * of known contacts, GoPlus (when enabled), and whether it has code.
+   */
+  async checkAddress(input: { address: string; chainId: number | string; account?: string }): Promise<{
+    address: string;
+    chainId: number;
+    via: ResolvedRecipient['via'];
+    kind: 'wallet' | 'contract' | 'delegated-wallet' | 'unknown';
+    known: boolean;
+    severity: SecurityView['severity'];
+    findings: RiskFinding[];
+    checks: CheckRun[];
+    next: string;
+  }> {
+    const chainId = requireChainId(input.chainId);
+    const resolved = await this.recipientFor(input.address, chainId);
+    const accounts = this.vault.listAccounts();
+    const from = input.account !== undefined ? this.vault.requireAccount(input.account).address : (accounts[0]?.address ?? '0x0000000000000000000000000000000000000000');
+    const subject: SecuritySubject = {
+      kind: 'transaction',
+      chainId,
+      from,
+      intent: { kind: 'native-transfer', recipient: resolved.address },
+      counterparties: [{ role: 'recipient', address: resolved.address }],
+    };
+    const security = await this.assess(subject, { recipient: resolved }, []);
+    const { provider } = await this.providerFor(chainId);
+    const code = await provider.getCode(resolved.address).catch(() => undefined);
+    const kind = code === undefined ? 'unknown' : code === '0x' || code === '' ? 'wallet' : code.toLowerCase().startsWith('0xef0100') ? 'delegated-wallet' : 'contract';
+    const known = this.knownCounterparties(from).has(resolved.address.toLowerCase());
+    const next =
+      security.severity === 'critical'
+        ? 'Do NOT pay this address: the wallet will refuse. Tell the user why.'
+        : security.severity === 'high'
+          ? 'High risk: relay every finding to the user word for word before doing anything else.'
+          : 'No blocking findings. Still confirm the full address with the user before paying.';
+    return { address: resolved.address, chainId, via: resolved.via, kind, known, severity: security.severity, findings: security.findings, checks: security.checks, next };
   }
 
   /**
@@ -1718,6 +1936,31 @@ function valueOf(input: { value?: string | bigint; amount?: string }, decimals: 
   return BigInt(raw);
 }
 
+/** A report made of pipeline notes only (no checks ran). */
+function notesOnly(notes: RiskFinding[]): SecurityView {
+  const findings = [...notes].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  return { severity: findings[0]?.severity ?? 'none', findings, checks: [] };
+}
+
+/** One line per finding; high/critical carry a visible mark. */
+function warningLines(findings: RiskFinding[]): string[] {
+  return findings.map((entry) => (severityRank(entry.severity) >= severityRank('high') ? `${severityMark(entry.severity)}: ${entry.message}` : entry.message));
+}
+
+/** Findings for an approval prompt: a security block, strongest first. */
+function findingLines(findings: RiskFinding[]): string[] {
+  if (findings.length === 0) return [];
+  return ['', 'Security checks:', ...findings.map((entry) => `${severityMark(entry.severity)} ${entry.message}`)];
+}
+
+/** What the agent should do with a denied request. */
+function blockedNext(decision: PolicyDecision): string {
+  if (decision.ruleId?.startsWith('security:') === true) {
+    return 'Blocked by a security check (see security.findings). Tell the user exactly why. Do not retry, split the payment, change the route, or look for another way to send it.';
+  }
+  return 'Blocked by the signing policy. Explain the policy reason to the user; do not try to work around it.';
+}
+
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}…`;
 }
@@ -1769,7 +2012,7 @@ function headlineFor(intent: Intent, tx: PopulatedTransaction, chainId: number, 
 }
 
 /** Approval prompt text: full addresses (never truncated — poisoning), real amounts, warnings. */
-function approvalTextFor(plan: Plan, tx: PopulatedTransaction, decision: PolicyDecision): string {
+function approvalTextFor(plan: Plan, tx: PopulatedTransaction, decision: PolicyDecision, findings: RiskFinding[]): string {
   const chain = getChain(plan.chainId);
   const symbol = chain?.symbol ?? 'ETH';
   const maxFee = tx.gasLimit * (tx.maxFeePerGas ?? tx.gasPrice ?? 0n);
@@ -1789,7 +2032,7 @@ function approvalTextFor(plan: Plan, tx: PopulatedTransaction, decision: PolicyD
   }
   lines.push(`Network fee: up to ${formatEther(maxFee)} ${symbol} (gas limit ${tx.gasLimit.toString()}${tx.maxFeePerGas !== undefined ? ` @ ≤ ${formatUnits(tx.maxFeePerGas, 'gwei')} gwei` : ''})`);
   lines.push(`Nonce: ${String(tx.nonce)}`);
-  for (const warning of plan.warnings) lines.push(`⚠ ${warning}`);
+  lines.push(...findingLines(findings));
   lines.push('', `Policy: ${decision.reason}`);
   return lines.join('\n');
 }
@@ -1801,6 +2044,7 @@ function typedDataApprovalText(
   typedDataJson: string,
   decision: PolicyDecision,
   purpose: string | undefined,
+  findings: RiskFinding[],
 ): string {
   const chainId = normalizeChainId(domain.chainId);
   const known = intent.token !== undefined && chainId !== undefined ? findKnownToken(chainId, intent.token) : undefined;
@@ -1827,6 +2071,7 @@ function typedDataApprovalText(
   ];
   if (purpose !== undefined) lines.push(`Purpose: ${purpose}`);
   if (intent.deadline !== undefined) lines.push(`Valid until: ${new Date(intent.deadline * 1000).toISOString()}`);
+  lines.push(...findingLines(findings));
   lines.push(`Payload: ${truncate(typedDataJson, 400)}`, '', `Policy: ${decision.reason}`);
   return lines.join('\n');
 }

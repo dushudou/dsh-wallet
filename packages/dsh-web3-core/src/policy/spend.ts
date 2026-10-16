@@ -11,6 +11,13 @@
 import { readFile, rename, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { ReloadingState } from '../reloading.js';
+
+function parseSpendState(raw: unknown): SpendState {
+  const parsed = raw as SpendState;
+  if (parsed?.version !== 1 || !Array.isArray(parsed.events)) throw new Error('invalid spend-state document');
+  return parsed;
+}
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const PRUNE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
@@ -36,22 +43,28 @@ interface SpendState {
 
 /** Tracks signed value over a rolling 24h window, backed by one JSON file. */
 export class SpendTracker {
-  private state: SpendState = { version: 1, events: [] };
+  /** Follows the state file, so every process sees the operations the others signed. */
+  private readonly file: ReloadingState<SpendState>;
   private readonly path: string;
 
   constructor(directory: string) {
     this.path = join(directory, 'spend-state.json');
+    this.file = new ReloadingState(this.path, { version: 1, events: [] }, parseSpendState);
+  }
+
+  private get state(): SpendState {
+    return this.file.get();
+  }
+
+  private set state(next: SpendState) {
+    this.file.set(next);
   }
 
   /** Load state from disk (missing file is a fresh tracker). */
   async load(): Promise<void> {
     try {
       const raw = await readFile(this.path, 'utf8');
-      const parsed = JSON.parse(raw) as SpendState;
-      if (parsed.version !== 1 || !Array.isArray(parsed.events)) {
-        throw new Error('invalid spend-state document');
-      }
-      this.state = parsed;
+      this.state = parseSpendState(JSON.parse(raw));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         this.state = { version: 1, events: [] };

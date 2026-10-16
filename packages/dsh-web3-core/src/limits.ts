@@ -31,16 +31,32 @@ export interface AssetCap {
   perDay?: string;
 }
 
-/** The persisted limits document (`limits.json`). */
-export interface WalletLimits {
-  version: 1;
-  updatedAt: string;
-  /** Direct transfers only to trusted contacts and own accounts. */
-  whitelistOnly: boolean;
+/** Caps of one band (hard ceiling or automatic budget), per asset class. */
+export interface LimitBand {
   /** Caps on known USD stablecoins. */
   usd: AssetCap;
   /** Caps per native coin symbol (`ETH`, `BNB`, `POL`, …). */
   native: Record<string, AssetCap>;
+}
+
+/**
+ * The persisted limits document (`limits.json`).
+ *
+ * Two bands, both wallet-wide and rolling over 24h:
+ * - the top-level `usd` / `native` caps are the **hard ceiling**: above it a
+ *   request is refused, in every autonomy mode, until the user raises it in
+ *   the settings panel;
+ * - `auto` is the **automatic budget** used by the semi-managed mode: above it
+ *   (but within the hard ceiling) a request is held for the human instead of
+ *   being signed. The full-managed mode has no automatic budget.
+ */
+export interface WalletLimits extends LimitBand {
+  version: 1;
+  updatedAt: string;
+  /** Direct transfers only to trusted contacts and own accounts. */
+  whitelistOnly: boolean;
+  /** Automatic budget (semi-managed mode). Defaults to a tenth of the hard ceiling. */
+  auto: LimitBand;
   /** Apply caps and the whitelist on testnets too (default: exempt). */
   includeTestnets?: boolean;
 }
@@ -106,7 +122,39 @@ export function defaultLimits(): WalletLimits {
   for (const chain of listChains()) {
     if (!chain.testnet) native[chain.symbol.toUpperCase()] = { ...DEFAULT_NATIVE_CAP };
   }
-  return { version: 1, updatedAt: new Date().toISOString(), whitelistOnly: false, usd: { ...DEFAULT_USD_CAP }, native };
+  const usd = { ...DEFAULT_USD_CAP };
+  return {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    whitelistOnly: false,
+    usd,
+    native,
+    auto: defaultAutoBand({ usd, native }),
+  };
+}
+
+/** A tenth of one decimal amount (exact, no float rounding). */
+function tenth(amount: string | undefined): string | undefined {
+  // Invalid input is left for validateLimits to report, not parsed here.
+  if (amount === undefined || !AMOUNT_RE.test(amount)) return undefined;
+  const scaled = parseUnits(amount, 18) / 10n;
+  return formatFixed(scaled, 18);
+}
+
+/** The automatic budget that follows a hard ceiling: a tenth of every cap. */
+export function defaultAutoBand(hard: LimitBand): LimitBand {
+  const native: Record<string, AssetCap> = {};
+  for (const [symbol, cap] of Object.entries(hard.native)) {
+    const perTx = tenth(cap.perTx);
+    const perDay = tenth(cap.perDay);
+    if (perTx !== undefined || perDay !== undefined) native[symbol] = { ...(perTx !== undefined ? { perTx } : {}), ...(perDay !== undefined ? { perDay } : {}) };
+  }
+  const usd: AssetCap = {};
+  const usdTx = tenth(hard.usd.perTx);
+  const usdDay = tenth(hard.usd.perDay);
+  if (usdTx !== undefined) usd.perTx = usdTx;
+  if (usdDay !== undefined) usd.perDay = usdDay;
+  return { usd, native };
 }
 
 /** Decimal strings only: no signs, exponents, separators, or units. */
@@ -141,6 +189,13 @@ export function validateLimits(input: unknown): string[] {
       errors.push(...capErrors(cap, `native.${symbol}`));
     }
   }
+  if (limits.auto !== undefined) {
+    if (limits.auto === null || typeof limits.auto !== 'object') errors.push('auto must be an object');
+    else {
+      errors.push(...capErrors(limits.auto.usd ?? {}, 'auto.usd'));
+      for (const [symbol, cap] of Object.entries(limits.auto.native ?? {})) errors.push(...capErrors(cap, `auto.native.${symbol}`));
+    }
+  }
   return errors;
 }
 
@@ -158,12 +213,19 @@ export function normalizeLimits(input: unknown): WalletLimits {
     const cleaned = clean(cap);
     if (cleaned.perTx !== undefined || cleaned.perDay !== undefined) native[symbol.trim().toUpperCase()] = cleaned;
   }
+  const hard: LimitBand = { usd: clean(raw.usd), native };
+  const autoNative: Record<string, AssetCap> = {};
+  for (const [symbol, cap] of Object.entries(raw.auto?.native ?? {})) {
+    const cleaned = clean(cap);
+    if (cleaned.perTx !== undefined || cleaned.perDay !== undefined) autoNative[symbol.trim().toUpperCase()] = cleaned;
+  }
   const limits: WalletLimits = {
     version: 1,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
     whitelistOnly: raw.whitelistOnly === true,
-    usd: clean(raw.usd),
-    native,
+    ...hard,
+    // A document without an automatic budget (written before it existed) gets the default one.
+    auto: raw.auto === undefined ? defaultAutoBand(hard) : { usd: clean(raw.auto.usd), native: autoNative },
     ...(raw.includeTestnets === true ? { includeTestnets: true } : {}),
   };
   const errors = validateLimits(limits);
@@ -224,14 +286,25 @@ function nativeSpent(events: readonly SpendWindowEvent[], symbol: string, now: n
 }
 
 /**
- * Check one signing request against the hard limits. Pure: reads only its
- * arguments. Returns the first violated limit with a user-facing reason.
+ * Check one signing request against one band of the limits. Pure: reads only
+ * its arguments. Returns the first violated cap with a user-facing reason.
+ *
+ * `band: 'hard'` checks the hard ceiling (and the transfer whitelist);
+ * `band: 'auto'` checks the automatic budget only.
  */
-export function checkLimits(limits: WalletLimits, request: LimitRequest, context: LimitContext, now = Date.now()): LimitVerdict {
+export function checkLimits(
+  limits: WalletLimits,
+  request: LimitRequest,
+  context: LimitContext,
+  now = Date.now(),
+  band: 'hard' | 'auto' = 'hard',
+): LimitVerdict {
   if (isExempt(limits, request.chainId)) return { ok: true };
   const { intent } = request;
+  const caps: LimitBand = band === 'auto' ? limits.auto : limits;
+  const label = band === 'auto' ? 'auto.' : '';
 
-  if (limits.whitelistOnly && DIRECT_TRANSFER_INTENTS.includes(intent.kind)) {
+  if (band === 'hard' && limits.whitelistOnly && DIRECT_TRANSFER_INTENTS.includes(intent.kind)) {
     // A Permit2 signature transfer names no recipient: the spender chooses
     // where the tokens go, so the spender itself must be trusted.
     const recipient = intent.recipient ?? (intent.kind === 'permit-transfer' ? intent.spender : undefined);
@@ -250,13 +323,13 @@ export function checkLimits(limits: WalletLimits, request: LimitRequest, context
     const chain = request.chainId !== undefined ? getChain(request.chainId) : undefined;
     const symbol = chain?.symbol ?? 'ETH';
     const decimals = chain?.decimals ?? 18;
-    const cap = limits.native[symbol];
+    const cap = caps.native[symbol];
     const perTx = capValue(cap?.perTx, decimals);
     if (perTx !== undefined && value > perTx) {
       return {
         ok: false,
         code: 'LIMIT_EXCEEDED',
-        limit: `native.${symbol}.perTx`,
+        limit: `${label}native.${symbol}.perTx`,
         reason: `${formatFixed(value, decimals)} ${symbol} exceeds the per-transaction limit of ${cap?.perTx ?? ''} ${symbol}`,
       };
     }
@@ -267,7 +340,7 @@ export function checkLimits(limits: WalletLimits, request: LimitRequest, context
         return {
           ok: false,
           code: 'LIMIT_EXCEEDED',
-          limit: `native.${symbol}.perDay`,
+          limit: `${label}native.${symbol}.perDay`,
           reason: `${formatFixed(value, decimals)} ${symbol} would bring today's total to ${formatFixed(spent + value, decimals)} ${symbol}, over the daily limit of ${cap?.perDay ?? ''} ${symbol}`,
         };
       }
@@ -278,24 +351,24 @@ export function checkLimits(limits: WalletLimits, request: LimitRequest, context
     const stable = stableToken(request.chainId, intent.token);
     if (stable !== undefined) {
       const amount = toUsdFixed(BigInt(intent.amount), stable.decimals);
-      const perTx = capValue(limits.usd.perTx, USD_DECIMALS);
+      const perTx = capValue(caps.usd.perTx, USD_DECIMALS);
       if (perTx !== undefined && amount > perTx) {
         return {
           ok: false,
           code: 'LIMIT_EXCEEDED',
-          limit: 'usd.perTx',
-          reason: `${formatFixed(amount, USD_DECIMALS)} ${stable.symbol} exceeds the per-transaction limit of $${limits.usd.perTx ?? ''}`,
+          limit: `${label}usd.perTx`,
+          reason: `${formatFixed(amount, USD_DECIMALS)} ${stable.symbol} exceeds the per-transaction limit of $${caps.usd.perTx ?? ''}`,
         };
       }
-      const perDay = capValue(limits.usd.perDay, USD_DECIMALS);
+      const perDay = capValue(caps.usd.perDay, USD_DECIMALS);
       if (perDay !== undefined) {
         const spent = usdSpent(context.recentSpend, now);
         if (spent + amount > perDay) {
           return {
             ok: false,
             code: 'LIMIT_EXCEEDED',
-            limit: 'usd.perDay',
-            reason: `${formatFixed(amount, USD_DECIMALS)} ${stable.symbol} would bring today's stablecoin total to $${formatFixed(spent + amount, USD_DECIMALS)}, over the daily limit of $${limits.usd.perDay ?? ''}`,
+            limit: `${label}usd.perDay`,
+            reason: `${formatFixed(amount, USD_DECIMALS)} ${stable.symbol} would bring today's stablecoin total to $${formatFixed(spent + amount, USD_DECIMALS)}, over the daily limit of $${caps.usd.perDay ?? ''}`,
           };
         }
       }
@@ -331,6 +404,16 @@ export function isTighteningLimits(prev: WalletLimits, next: WalletLimits): bool
   if (!capTightened(prev.usd.perDay, next.usd.perDay, USD_DECIMALS)) return false;
   for (const [symbol, cap] of Object.entries(prev.native)) {
     const after = next.native[symbol];
+    if (!capTightened(cap.perTx, after?.perTx, 18)) return false;
+    if (!capTightened(cap.perDay, after?.perDay, 18)) return false;
+  }
+  // The automatic budget is part of the same ceiling: loosening it needs the PIN too.
+  const prevAuto: LimitBand = prev.auto ?? { usd: {}, native: {} };
+  const nextAuto: LimitBand = next.auto ?? { usd: {}, native: {} };
+  if (!capTightened(prevAuto.usd.perTx, nextAuto.usd.perTx, USD_DECIMALS)) return false;
+  if (!capTightened(prevAuto.usd.perDay, nextAuto.usd.perDay, USD_DECIMALS)) return false;
+  for (const [symbol, cap] of Object.entries(prevAuto.native)) {
+    const after = nextAuto.native[symbol];
     if (!capTightened(cap.perTx, after?.perTx, 18)) return false;
     if (!capTightened(cap.perDay, after?.perDay, 18)) return false;
   }

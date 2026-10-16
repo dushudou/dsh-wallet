@@ -2,6 +2,23 @@
 
 All notable changes to `dsh-web3` (the DSH bundle) and `dsh-web3-core` (the library). Dates are npm publish dates. The project follows [Semantic Versioning](https://semver.org/); while in `0.x`, a minor version may contain breaking changes, which are listed under **Breaking**.
 
+## dsh-web3 0.9.0 / dsh-web3-core 0.5.0 — 2026-10-16
+
+### Breaking
+
+- The `agent` policy preset is replaced by `agent-semi` and `agent-full`. Fresh vaults start in `agent-semi`; existing `policy.json` files are unchanged.
+- `limits.json` gains an `auto` band. Files without it are upgraded with the default automatic budget (a tenth of the hard ceiling).
+
+### Changed
+
+- **Agent autonomy presets.** `agent-semi` and `agent-full`: transactions, token moves, typed data and messages are signed without a prompt, bounded by the security checks (critical → refused, high → asked), the daily PIN and two limit bands. The hard ceiling (`limits.json`, the existing caps) refuses above it in both modes; only the user can raise it. `agent-semi` also has an automatic budget (`limits.auto`, default a tenth of the ceiling): above it the operation is returned as `needs-human` and nothing is signed, so the agent can tell the user instead of stalling. `agent-full` has no automatic budget. Fresh vaults start in `agent-semi`; an existing `policy.json` is never changed by an upgrade. Switch in Settings → Web3 → Security (loosening needs the PIN). Agents can still only tighten.
+- The vault's account index, signing policy, hard limits, security settings and 24h spend window follow their files on disk, so changes made by another process (the CLI, a second plugin instance) are visible without a restart.
+
+### Fixed
+
+- An account created after the host started (by another process) could not be used for signing until a restart: the account index was read once at open and only the accounts unlocked at startup were decrypted. Accounts are now picked up from disk and decrypted on first use with the session passphrase.
+- Spend caps counted only operations signed by the same process; operations signed elsewhere in the 24h window are now included.
+
 ## dsh-web3 0.8.2 — 2026-10-16
 
 ### Fixed

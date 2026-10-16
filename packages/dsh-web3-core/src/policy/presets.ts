@@ -9,7 +9,7 @@ import type { PolicyRule, SigningPolicy } from './types.js';
 import type { IntentKind } from '../intent.js';
 import { knownTokens } from '../tokens.js';
 
-export type PolicyPresetId = 'locked' | 'strict' | 'testnet' | 'power' | 'micropay';
+export type PolicyPresetId = 'locked' | 'strict' | 'testnet' | 'power' | 'micropay' | 'agent-semi' | 'agent-full';
 
 /** Every transaction intent — used by rules meant to cover all tx shapes (dev chains, testnets). */
 const ALL_TX_INTENTS: IntentKind[] = [
@@ -188,12 +188,49 @@ export function policyPreset(id: PolicyPresetId): SigningPolicy {
         ],
       };
     }
+    case 'agent-semi':
+    case 'agent-full': {
+      // Agent autonomy. The user has already trusted the agent with its job, so
+      // routine signing runs unattended. What still stops a signature:
+      // - above the hard ceiling (limits.json): refused in both modes, until the
+      //   user raises the ceiling in the settings panel;
+      // - semi only: above the automatic budget: held for the human (`needs-human`);
+      // - a critical security finding: refused; a high one: asked;
+      // - an unlimited permission: asked.
+      const autonomy = id === 'agent-semi' ? 'semi' : 'full';
+      return {
+        version: 1,
+        updatedAt: nowIso(),
+        defaultEffect: 'allow',
+        autonomy,
+        rules: [
+          rule({
+            id: 'agent-transactions',
+            description: 'agent transactions and token moves signed unattended, within the limits',
+            priority: 500,
+            effect: 'allow',
+            match: { type: 'signTransaction', intents: ALL_TX_INTENTS, tokenLimits: [{ token: '*' }] },
+          }),
+          rule({
+            id: 'agent-signatures',
+            description: 'agent messages, typed data and payment authorizations signed unattended, within the limits',
+            priority: 500,
+            effect: 'allow',
+            match: {
+              type: ['signMessage', 'signTypedData'],
+              intents: ALL_SIGNATURE_INTENTS,
+              tokenLimits: [{ token: '*' }],
+            },
+          }),
+        ],
+      };
+    }
   }
 }
 
 /** The preset id a policy document was generated from, when detectable. */
 export function detectPreset(policy: SigningPolicy): PolicyPresetId | undefined {
-  const presets: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay'];
+  const presets: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay', 'agent-semi', 'agent-full'];
   for (const id of presets) {
     const preset = policyPreset(id);
     const a = JSON.stringify({ ...preset, updatedAt: 0, rules: preset.rules.map((r) => ({ ...r, id: 'x', description: r.description })) });

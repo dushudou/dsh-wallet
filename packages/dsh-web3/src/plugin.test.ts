@@ -35,6 +35,9 @@ let approval: ApprovalStub;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'dsh-web3-test-'));
   vault = await WalletVault.open({ directory: dir });
+  // These cases exercise the approval gate, so pin the strict preset instead of
+  // the fresh-vault default (agent autonomy, which signs unattended).
+  await vault.setPolicy(policyPreset('strict'));
   provider = new MockChainProvider(31337);
   approval = new ApprovalStub();
   service = new WalletService(vault, {
@@ -103,6 +106,73 @@ describe('wallet service: send transaction under policy', () => {
     expect(parsed.to?.toLowerCase()).toBe(RECIPIENT.toLowerCase());
     expect(parsed.value).toBe(1000n);
     expect(approval.requests).toHaveLength(0); // allow: no approval asked
+  });
+
+  describe('agent autonomy (fresh-vault default)', () => {
+    beforeEach(async () => {
+      await vault.setPolicy(policyPreset('agent-full'));
+    });
+
+    it('signs a mainnet transfer within the hard limits without asking', async () => {
+      const accountId = await importHardhatAccount();
+      const result = await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: '1000' }, approval);
+      expect(result.status).toBe('signed-broadcast');
+      expect(approval.requests).toHaveLength(0);
+      expect(provider.broadcasted).toHaveLength(1);
+    });
+
+    it('refuses anything above the hard limit, even though the policy would sign it', async () => {
+      const accountId = await importHardhatAccount();
+      // 2 ETH on mainnet > the 1 ETH per-transaction native cap in the default limits.
+      const result = await service.sendTransaction(
+        { from: accountId, chainId: 1, to: RECIPIENT, value: '2000000000000000000' },
+        approval,
+      );
+      expect(result.status).toBe('denied-by-policy');
+      expect(result.decision.limit?.name).toBe('native.ETH.perTx');
+      expect(approval.requests).toHaveLength(0);
+      expect(provider.broadcasted).toHaveLength(0);
+    });
+  });
+
+  describe('semi-managed and full-managed bands', () => {
+    // Defaults: hard ceiling 1 ETH per tx / 100 per day; automatic budget 0.1 ETH per tx / 10 per day.
+    const BETWEEN = '500000000000000000'; // 0.5 ETH: above the automatic budget, under the hard ceiling
+    const ABOVE = '2000000000000000000'; // 2 ETH: above the hard ceiling
+
+    it('semi: holds an operation between the automatic budget and the hard ceiling, without prompting', async () => {
+      await vault.setPolicy(policyPreset('agent-semi'));
+      const accountId = await importHardhatAccount();
+      const result = await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: BETWEEN }, approval);
+      expect(result.status).toBe('needs-human');
+      expect(result.decision.guardrail).toBe('auto-budget');
+      expect(result.next).toContain('nothing was signed');
+      expect(approval.requests).toHaveLength(0);
+      expect(provider.broadcasted).toHaveLength(0);
+    });
+
+    it('full: signs the same operation unattended (no automatic budget)', async () => {
+      await vault.setPolicy(policyPreset('agent-full'));
+      const accountId = await importHardhatAccount();
+      const result = await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: BETWEEN }, approval);
+      expect(result.status).toBe('signed-broadcast');
+      expect(approval.requests).toHaveLength(0);
+    });
+
+    it('semi: still signs within the automatic budget', async () => {
+      await vault.setPolicy(policyPreset('agent-semi'));
+      const accountId = await importHardhatAccount();
+      const result = await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: '10000000000000000' }, approval);
+      expect(result.status).toBe('signed-broadcast');
+    });
+
+    it('semi: refuses above the hard ceiling (not held)', async () => {
+      await vault.setPolicy(policyPreset('agent-semi'));
+      const accountId = await importHardhatAccount();
+      const result = await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: ABOVE }, approval);
+      expect(result.status).toBe('denied-by-policy');
+      expect(result.decision.limit?.name).toBe('native.ETH.perTx');
+    });
   });
 
   it('asks for approval on mainnet and signs when allowed', async () => {

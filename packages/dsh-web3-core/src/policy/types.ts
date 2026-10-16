@@ -103,7 +103,17 @@ export interface SigningPolicy {
   /** Decision for requests no rule matched. Defaults to `ask`. */
   defaultEffect: PolicyEffect;
   rules: PolicyRule[];
+  /**
+   * How an allowed request is handled once it exceeds the automatic budget
+   * (see `WalletLimits.auto`). `semi`: held for the human (returned as
+   * `needs-human`). `full`, or absent: signed unattended up to the hard
+   * ceiling. The hard ceiling refuses in every mode.
+   */
+  autonomy?: AutonomyMode;
 }
+
+/** Autonomy of an agent-driven wallet. */
+export type AutonomyMode = 'semi' | 'full';
 
 /** The request being authorized. */
 export interface PolicyRequest {

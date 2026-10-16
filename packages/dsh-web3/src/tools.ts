@@ -129,7 +129,7 @@ export interface BuildToolsOptions {
   allowModelSecretReveal?: boolean;
 }
 
-const PRESETS: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay'];
+const PRESETS: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay', 'agent-semi', 'agent-full'];
 
 const accountSelector: ParamSpec = { type: 'string', description: 'Account id, address, or exact label (see wallet_list).', required: true };
 const chainId: ParamSpec = {

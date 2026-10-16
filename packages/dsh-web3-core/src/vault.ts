@@ -57,6 +57,7 @@ import { defaultLimits, normalizeLimits, validateLimits, type WalletLimits } fro
 import { Denylist } from './denylist.js';
 import { loadSecuritySettings, normalizeSecuritySettings, validateSecuritySettings, type SecuritySettings } from './security.js';
 import type { PolicyRequest, SigningPolicy } from './policy/types.js';
+import { ReloadingState } from './reloading.js';
 
 /** Vault configuration. */
 export interface VaultConfig {
@@ -150,8 +151,36 @@ interface KeyFile extends KeystoreEnvelope {
 
 /** The vault manager. */
 export class WalletVault {
-  private index: VaultIndex;
-  private readonly config: Required<Pick<VaultConfig, 'directory'>> & VaultConfig;
+  /** Account index, policy, limits and security settings follow their files (see ReloadingState). */
+  private readonly indexFile: ReloadingState<VaultIndex>;
+  private readonly policyFile: ReloadingState<SigningPolicy>;
+  private readonly limitsFile: ReloadingState<WalletLimits>;
+  private readonly securityFile: ReloadingState<SecuritySettings>;
+  private get index(): VaultIndex {
+    return this.indexFile.get();
+  }
+  private set index(next: VaultIndex) {
+    this.indexFile.set(next);
+  }
+  private get policy(): SigningPolicy {
+    return this.policyFile.get();
+  }
+  private set policy(next: SigningPolicy) {
+    this.policyFile.set(next);
+  }
+  private get limits(): WalletLimits {
+    return this.limitsFile.get();
+  }
+  private set limits(next: WalletLimits) {
+    this.limitsFile.set(next);
+  }
+  private get security(): SecuritySettings {
+    return this.securityFile.get();
+  }
+  private set security(next: SecuritySettings) {
+    this.securityFile.set(next);
+  }
+  private readonly config:Required<Pick<VaultConfig, 'directory'>> & VaultConfig;
   private unlockedAccounts = new Map<string, UnlockedAccount>();
   private passphrase: string | undefined;
   private lastActivity = 0;
@@ -166,10 +195,23 @@ export class WalletVault {
 
   private constructor(config: VaultConfig, index: VaultIndex, policy: SigningPolicy, limits: WalletLimits, security: SecuritySettings) {
     this.config = { autoLockMs: DEFAULT_AUTO_LOCK_MS, ...config };
-    this.index = index;
-    this.policy = policy;
-    this.limits = limits;
-    this.security = security;
+    const dir = config.directory;
+    this.indexFile = new ReloadingState(join(dir, 'vault.json'), index, parseVaultIndex);
+    this.policyFile = new ReloadingState(join(dir, 'policy.json'), policy, (raw) => {
+      const errors = validatePolicy(raw as SigningPolicy);
+      if (errors.length > 0) throw new Error(`invalid policy: ${errors.join('; ')}`);
+      return raw as SigningPolicy;
+    });
+    this.limitsFile = new ReloadingState(join(dir, 'limits.json'), limits, (raw) => {
+      const errors = validateLimits(raw);
+      if (errors.length > 0) throw new Error(`invalid limits: ${errors.join('; ')}`);
+      return normalizeLimits(raw);
+    });
+    this.securityFile = new ReloadingState(join(dir, 'security.json'), security, (raw) => {
+      const errors = validateSecuritySettings(raw);
+      if (errors.length > 0) throw new Error(`invalid security settings: ${errors.join('; ')}`);
+      return normalizeSecuritySettings(raw);
+    });
     this.audit = new AuditLog(config.directory);
     this.spend = new SpendTracker(config.directory);
     this.journal = new TxJournal(config.directory);
@@ -177,9 +219,6 @@ export class WalletVault {
     this.denylist = new Denylist(config.directory);
   }
 
-  private policy: SigningPolicy;
-  private limits: WalletLimits;
-  private security: SecuritySettings;
 
   /** Open (or initialize) a vault directory. */
   static async open(config: VaultConfig): Promise<WalletVault> {
@@ -210,7 +249,9 @@ export class WalletVault {
       if (errors.length > 0) throw new Error(`invalid policy: ${errors.join('; ')}`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        policy = policyPreset('micropay');
+        // Fresh vaults start in agent autonomy (within the hard limits); an
+        // existing policy.json is never changed by an upgrade.
+        policy = policyPreset('agent-semi');
         await writeJsonPrivate(policyPath, policy);
       } else {
         throw error;
@@ -386,6 +427,27 @@ export class WalletVault {
     return account;
   }
 
+  /**
+   * The unlocked account for signing. An account added after this process
+   * unlocked the vault (another process, or the CLI) is decrypted here with the
+   * session passphrase, so it signs without a restart.
+   */
+  async unlockedAccount(selector: string): Promise<UnlockedAccount> {
+    this.ensureUnlocked();
+    const meta = this.requireAccount(selector);
+    const known = this.unlockedAccounts.get(meta.id);
+    if (known !== undefined) {
+      this.lastActivity = Date.now();
+      return known;
+    }
+    if (this.passphrase === undefined) throw new VaultLockedError(`account ${meta.label} is not unlocked`);
+    const secret = await this.readAccountSecret(meta.id, this.passphrase);
+    const account = new UnlockedAccount(meta, secret);
+    this.unlockedAccounts.set(meta.id, account);
+    this.lastActivity = Date.now();
+    return account;
+  }
+
   /** The stored passphrase (for re-encrypting on new accounts); internal. */
   currentPassphrase(): string | undefined {
     return this.passphrase;
@@ -430,7 +492,7 @@ export class WalletVault {
    * vault to be unlocked so the source mnemonic can be read in memory.
    */
   async deriveAccount(input: { fromAccountId: string; index?: number; label?: string }): Promise<{ meta: AccountMeta }> {
-    const source = this.getUnlockedAccount(input.fromAccountId);
+    const source = await this.unlockedAccount(input.fromAccountId);
     const secret = source.reveal();
     if (secret.mnemonic === undefined || source.meta.mnemonicId === undefined) {
       throw new Error(`account ${source.meta.label} was not derived from a mnemonic; cannot derive siblings`);
@@ -578,7 +640,7 @@ export class WalletVault {
 
   /** Export an account as a Web3 Secret Storage keystore JSON. */
   async exportKeystore(accountId: string, keystorePassphrase: string): Promise<{ json: string; address: string }> {
-    const account = this.getUnlockedAccount(accountId);
+    const account = await this.unlockedAccount(accountId);
     const secret = account.reveal();
     const wallet = new Wallet(secret.privateKey);
     const json = await wallet.encrypt(keystorePassphrase);
@@ -710,6 +772,12 @@ export class WalletVault {
 }
 
 /** Write JSON with 0600 perms via temp+rename. */
+function parseVaultIndex(raw: unknown): VaultIndex {
+  const index = raw as VaultIndex;
+  if (index?.version !== 1) throw new Error(`unsupported vault version ${String((index as { version?: unknown } | undefined)?.version)}`);
+  return index;
+}
+
 async function writeJsonPrivate(path: string, value: unknown): Promise<void> {
   const tmp = `${path}.tmp-${randomBytes(4).toString('hex')}`;
   await writeFile(tmp, `${JSON.stringify(value, undefined, 2)}\n`, { mode: 0o600 });

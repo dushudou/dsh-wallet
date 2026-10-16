@@ -151,6 +151,8 @@ export interface SendResult {
     | 'awaiting-approval-rejected'
     | 'denied-by-policy'
     | 'unavailable-approver'
+    /** Held for the user: above the automatic budget in semi-managed mode. Nothing was signed. */
+    | 'needs-human'
     /** Signed, but the node's answer was lost: DO NOT resend — check wallet_tx_status. */
     | 'broadcast-uncertain'
     /** The node rejected the signed transaction; nothing was sent. */
@@ -174,7 +176,7 @@ export interface SendResult {
 
 /** What message signing did and produced. */
 export interface SignMessageResult {
-  status: 'signed' | 'awaiting-approval-rejected' | 'denied-by-policy' | 'unavailable-approver';
+  status: 'signed' | 'awaiting-approval-rejected' | 'denied-by-policy' | 'unavailable-approver' | 'needs-human';
   decision: PolicyDecision;
   approvalOutcome?: string;
   signature?: string;
@@ -1025,6 +1027,10 @@ export class WalletService {
     if (decision.effect === 'deny') {
       return (plan.result = { status: 'denied-by-policy', decision, summary: plan.headline, security, next: blockedNext(decision) });
     }
+    if (isBudgetHold(decision, security)) {
+      await this.holdForUser(account, decision, plan.headline);
+      return (plan.result = { status: 'needs-human', decision, summary: plan.headline, security, next: NEEDS_HUMAN_NEXT });
+    }
     // Lock + PIN before approval: never ask the human to approve something
     // the vault lock or the daily PIN gate would then refuse.
     this.requireUnlocked();
@@ -1052,7 +1058,7 @@ export class WalletService {
     }
 
     this.requireUnlocked();
-    const unlocked = this.vault.getUnlockedAccount(account.id);
+    const unlocked = await this.vault.unlockedAccount(account.id);
     const signed = await coreSignTransaction(unlocked.wallet, populated);
     // Journal BEFORE broadcast: if the node's answer is lost we still know the
     // hash, and the agent can check instead of paying twice.
@@ -1328,7 +1334,7 @@ export class WalletService {
       }
     }
     this.requireUnlocked();
-    const account = this.vault.getUnlockedAccount(meta.id);
+    const account = await this.vault.unlockedAccount(meta.id);
     const { signature } = await coreSignMessage(account.wallet, input.message);
     await this.vault.auditAppend('sign.message', { accountId: meta.id, address: meta.address, signature });
     const result: SignMessageResult = { status: 'signed', decision, signature, address: meta.address };
@@ -1388,6 +1394,10 @@ export class WalletService {
       risk: decision.risk,
     });
     if (decision.effect === 'deny') return { status: 'denied-by-policy', decision, address: meta.address, intent, security };
+    if (isBudgetHold(decision, security)) {
+      await this.holdForUser(meta, decision, intent.kind);
+      return { status: 'needs-human', decision, address: meta.address, intent, security };
+    }
     this.requireUnlocked();
     await this.pinGate();
     if (decision.effect === 'ask') {
@@ -1405,7 +1415,7 @@ export class WalletService {
       }
     }
     this.requireUnlocked();
-    const account = this.vault.getUnlockedAccount(meta.id);
+    const account = await this.vault.unlockedAccount(meta.id);
     const { signature } = await coreSignTypedData(account.wallet, domain, types, input.value);
     await this.vault.auditAppend('sign.typedData', { accountId: meta.id, address: meta.address, signature, intent: intent.kind });
     // A signed transfer authorization is a payment: count it toward caps.
@@ -1444,7 +1454,7 @@ export class WalletService {
     context: Partial<CallContext> = {},
   ): Promise<
     | { status: 'signed'; signature: string; authorization: { from: string; to: string; value: string; validAfter: number; validBefore: number; nonce: string }; payTo: string; asset: string; chainId: number; amount: string; amountFormatted?: string; expiresAt: number; resource?: string; decision: PolicyDecision; address: string; x402Version: number; scheme: 'exact'; network: string; security?: SecurityView }
-    | { status: 'awaiting-approval-rejected' | 'denied-by-policy' | 'unavailable-approver'; decision: PolicyDecision; address: string; security?: SecurityView }
+    | { status: 'awaiting-approval-rejected' | 'denied-by-policy' | 'unavailable-approver' | 'needs-human'; decision: PolicyDecision; address: string; security?: SecurityView }
   > {
     const challenge = normalizeX402Challenge(input.challenge);
     const chainId = resolveX402ChainId(challenge);
@@ -1548,22 +1558,54 @@ export class WalletService {
    * violated limit turns any `allow` / `ask` into `deny` — no rule and no
    * human click can sign past it.
    */
+  /** Record a hold for the user. Nothing is signed; no prompt blocks the agent. */
+  private async holdForUser(meta: Pick<AccountMeta, 'id' | 'address'>, decision: PolicyDecision, what: string): Promise<void> {
+    await this.vault.auditAppend('sign.needs-human', {
+      accountId: meta.id,
+      address: meta.address,
+      what,
+      limit: decision.limit?.name,
+      reason: decision.reason,
+    });
+  }
+
+  /**
+   * The decision for one request, after the limits. Above the hard ceiling
+   * the request is refused in every mode. In semi-managed mode, a request that
+   * fits the ceiling but not the automatic budget is held for the human
+   * (`ask` with guardrail `auto-budget`, which `executePlan` turns into
+   * `needs-human` instead of prompting).
+   */
   private decide(request: PolicyRequest): PolicyDecision {
     const decision = this.vault.evaluateSignPolicy(request);
     if (decision.effect === 'deny') return decision;
     const intent = intentOf(request) ?? { kind: 'message' as const };
-    const verdict = checkLimits(
-      this.vault.getLimits(),
-      { ...(request.chainId !== undefined ? { chainId: request.chainId } : {}), valueWei: BigInt(request.value ?? 0), intent },
-      { isWhitelisted: (address) => this.isWhitelisted(address), recentSpend: this.vault.spend.windowEvents() },
-    );
-    if (verdict.ok) return decision;
+    const limits = this.vault.getLimits();
+    const check = {
+      ...(request.chainId !== undefined ? { chainId: request.chainId } : {}),
+      valueWei: BigInt(request.value ?? 0),
+      intent,
+    };
+    const context = { isWhitelisted: (address: string) => this.isWhitelisted(address), recentSpend: this.vault.spend.windowEvents() };
+    const verdict = checkLimits(limits, check, context);
+    if (!verdict.ok) {
+      return {
+        ...decision,
+        effect: 'deny',
+        ruleId: `limit:${verdict.limit}`,
+        reason: `${verdict.reason}. This is a hard limit: only the user can change it, in DSH Settings → Web3 → Limits.`,
+        limit: { code: verdict.code, name: verdict.limit },
+      };
+    }
+    if (decision.effect !== 'allow' || this.vault.getPolicy().autonomy !== 'semi') return decision;
+    const budget = checkLimits(limits, check, context, Date.now(), 'auto');
+    if (budget.ok) return decision;
     return {
       ...decision,
-      effect: 'deny',
-      ruleId: `limit:${verdict.limit}`,
-      reason: `${verdict.reason}. This is a hard limit: only the user can change it, in DSH Settings → Web3 → Limits.`,
-      limit: { code: verdict.code, name: verdict.limit },
+      effect: 'ask',
+      guardrail: 'auto-budget',
+      reason: `${budget.reason}. Above the automatic budget, so it is held for the user (the hard limit is higher; see DSH Settings → Web3 → Limits)`,
+      limit: { code: budget.code, name: budget.limit },
     };
   }
 
@@ -1837,7 +1879,7 @@ export class WalletService {
   ): Promise<{ address: string; kind: string; value: string }> {
     await this.pinGate();
     this.requireUnlocked();
-    const account = this.vault.getUnlockedAccount(accountId);
+    const account = await this.vault.unlockedAccount(accountId);
     const secret = account.reveal();
     if (kind === 'mnemonic') {
       if (secret.mnemonic === undefined) throw new Error('account has no mnemonic (imported from a raw key)');
@@ -1856,7 +1898,7 @@ export class WalletService {
     const meta = this.vault.requireAccount(input.account);
     await this.stepUp(input.pin, 'reveal key material');
     this.requireUnlocked();
-    const account = this.vault.getUnlockedAccount(meta.id);
+    const account = await this.vault.unlockedAccount(meta.id);
     const secret = account.reveal();
     const value = input.kind === 'mnemonic' ? secret.mnemonic : secret.privateKey;
     if (value === undefined) throw new WalletError('INVALID_ARGUMENT', 'account has no mnemonic (imported from a raw key); reveal the private key instead');
@@ -2153,8 +2195,18 @@ function resolveX402ChainId(challenge: { network?: string; chainId?: number }): 
 }
 
 /** Presets in order of how much they let the wallet sign on its own. */
-const POLICY_PRESETS: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay'];
-const PRESET_RANK: Record<PolicyPresetId, number> = { locked: 0, strict: 1, micropay: 2, testnet: 2, power: 3 };
+/** A decision that holds the operation for the user instead of signing (semi-managed budget). */
+function isBudgetHold(decision: PolicyDecision, security: SecurityView): boolean {
+  if (decision.effect !== 'ask' || decision.guardrail !== 'auto-budget') return false;
+  // A high or critical security finding is a risk question: it goes to the approval prompt, not to a hold.
+  return !security.findings.some((finding) => finding.severity === 'high' || finding.severity === 'critical');
+}
+
+const NEEDS_HUMAN_NEXT =
+  'This is above the automatic budget, so nothing was signed. Tell the user the amount and why; they can approve it in DSH Settings → Web3, or raise the automatic budget there. Do not retry in a loop.';
+
+const POLICY_PRESETS: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay', 'agent-semi', 'agent-full'];
+const PRESET_RANK: Record<PolicyPresetId, number> = { locked: 0, strict: 1, micropay: 2, testnet: 2, power: 3, 'agent-semi': 4, 'agent-full': 5 };
 
 /**
  * Whether switching from `current` (undefined = custom policy) to `next`

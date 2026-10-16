@@ -87,7 +87,9 @@ Anything that weakens protection or exposes keys — loosening a preset or a lim
 | Preset | Signs on its own | Asks you |
 |---|---|---|
 | `strict` (recommended) | nothing | everything |
-| `micropay` (new wallets) | x402 USDC payments ≤ 1 each, ≤ 10 a day, after a merchant's first payment | everything else |
+| `agent-semi` (new wallets) | everything under the automatic budget, within the security checks | above the automatic budget: held for you (`needs-human`, nothing signed); high-severity findings and unlimited approvals ask; above the hard ceiling: refused |
+| `agent-full` | everything under the hard ceiling, within the security checks | above the hard ceiling: refused (raise it in Settings → Web3 → Limits); high-severity findings and unlimited approvals ask |
+| `micropay` | x402 USDC payments ≤ 1 each, ≤ 10 a day, after a merchant's first payment | everything else |
 | `testnet` | small testnet operations | mainnet |
 | `power` | mainnet native transfers ≤ 0.01 each, ≤ 0.05 a day | tokens, approvals, permits |
 | `locked` | nothing (refuses everything) | — |

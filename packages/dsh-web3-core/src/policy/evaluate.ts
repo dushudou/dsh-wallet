@@ -455,6 +455,9 @@ export function validatePolicy(policy: SigningPolicy): string[] {
     errors.push(`invalid defaultEffect ${JSON.stringify(policy.defaultEffect)}`);
   }
   if (!Array.isArray(policy.rules)) errors.push('policy.rules must be an array');
+  if (policy.autonomy !== undefined && policy.autonomy !== 'semi' && policy.autonomy !== 'full') {
+    errors.push(`invalid autonomy ${JSON.stringify(policy.autonomy)}`);
+  }
   const seen = new Set<string>();
   for (const [index, rule] of (policy.rules ?? []).entries()) {
     if (typeof rule.id !== 'string' || rule.id.length === 0) errors.push(`rules[${String(index)}].id missing`);

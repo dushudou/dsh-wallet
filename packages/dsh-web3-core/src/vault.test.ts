@@ -31,8 +31,8 @@ describe('vault lifecycle', () => {
     expect(status.directory).toBe(dir);
     expect(status.unlocked).toBe(false);
     expect(status.accountCount).toBe(0);
-    expect(status.policySummary.defaultEffect).toBe('ask');
-    expect(detectPreset(vault.getPolicy())).toBe('micropay');
+    expect(status.policySummary.defaultEffect).toBe('allow');
+    expect(detectPreset(vault.getPolicy())).toBe('agent-semi');
     const limits = vault.getLimits();
     expect(limits.usd).toEqual({ perTx: '100', perDay: '1000' });
     expect(limits.native.ETH).toEqual({ perTx: '1', perDay: '100' });

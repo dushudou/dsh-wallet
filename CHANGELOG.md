@@ -2,6 +2,12 @@
 
 All notable changes to `dsh-web3` (the DSH bundle) and `dsh-web3-core` (the library). Dates are npm publish dates. The project follows [Semantic Versioning](https://semver.org/); while in `0.x`, a minor version may contain breaking changes, which are listed under **Breaking**.
 
+## dsh-web3 0.8.2 — 2026-10-16
+
+### Fixed
+
+- Tool parameters are registered on `ctx.tools` as object-rooted JSON Schema (`{ type: "object", properties, required }`), the projection `defineTool()` performs. They were passed in the authoring DSL, which `register()` stores as-is, so strict providers rejected every turn — DeepSeek's native model failed with `Invalid schema for function 'wallet_address_book': schema must be a JSON Schema of 'type: "object"'`. Verified identical to DSH's own projection for all 30 tools.
+
 ## dsh-web3 0.8.1 / dsh-web3-core 0.4.1 — 2026-10-13
 
 ### Changed

@@ -560,6 +560,32 @@ describe('plugin entrypoint (applyWalletPlugin)', () => {
     return ctx;
   }
 
+  it('registers on ctx.tools with object-rooted JSON Schema parameters (strict providers reject DSL roots)', async () => {
+    const ctx = createMockCtx();
+    const definitions: Array<{ name: string; parameters: Record<string, unknown> }> = [];
+    ctx.services.set('tools', {
+      register(definition: { name: string; parameters: Record<string, unknown> }) {
+        definitions.push(definition);
+        return () => undefined;
+      },
+    });
+    const unload = applyWalletPlugin(ctx as never, { vaultPath: dir });
+    await waitFor(() => definitions.length > 0);
+    expect(ctx.registeredTools).toHaveLength(0); // ctx.tools wins over legacy model.tools
+    for (const definition of definitions) {
+      expect(definition.parameters.type, definition.name).toBe('object');
+      expect(typeof definition.parameters.properties, definition.name).toBe('object');
+    }
+    const addressBook = definitions.find((definition) => definition.name === 'wallet_address_book')!;
+    expect(addressBook.parameters).toMatchObject({
+      required: ['action'],
+      properties: { action: { type: 'string', enum: ['list', 'add', 'remove'] }, chainIds: { type: 'array', items: { type: 'number' } } },
+    });
+    const x402 = definitions.find((definition) => definition.name === 'wallet_x402_authorize')!;
+    expect((x402.parameters.properties as Record<string, Record<string, unknown>>).challenge!.type).toBeUndefined(); // json = any value
+    await unload();
+  });
+
   it('mounts ctx.wallet, registers tools and routes, and locks the vault on unload', async () => {
     const ctx = createMockCtx();
     const unload = applyWalletPlugin(ctx as never, { vaultPath: dir });

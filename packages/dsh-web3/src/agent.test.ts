@@ -452,14 +452,18 @@ describe('tool surface', () => {
     for (const name of registered) expect(mentioned, `tool ${name} is not documented in SKILL.md`).toContain(name);
   });
 
-  it('every tool parameter follows the DSH DSL (known types, descriptions on required params)', () => {
-    const types = new Set(['string', 'number', 'integer', 'boolean', 'json', 'array', 'object']);
+  it('every tool exposes an object-rooted JSON Schema (known types, descriptions on required params)', () => {
+    const types = new Set(['string', 'number', 'integer', 'boolean', 'array', 'object']);
     for (const entry of tools) {
       expect(entry.description.length, entry.name).toBeGreaterThan(20);
-      for (const [key, spec] of Object.entries(entry.parameters)) {
-        expect(types.has(spec.type), `${entry.name}.${key}`).toBe(true);
+      expect(entry.parameters.type, entry.name).toBe('object');
+      const required = new Set(entry.parameters.required ?? []);
+      for (const name of required) expect(entry.parameters.properties, `${entry.name} requires unknown ${name}`).toHaveProperty([name]);
+      for (const [key, spec] of Object.entries(entry.parameters.properties)) {
+        // An untyped property is the DSL's `json` (any JSON value).
+        if (spec.type !== undefined) expect(types.has(spec.type), `${entry.name}.${key}`).toBe(true);
         if (spec.type === 'array') expect(spec.items, `${entry.name}.${key} needs items`).toBeDefined();
-        if (spec.required === true && spec.enum === undefined) expect(spec.description, `${entry.name}.${key}`).toBeDefined();
+        if (required.has(key) && spec.enum === undefined) expect(spec.description, `${entry.name}.${key}`).toBeDefined();
       }
     }
   });

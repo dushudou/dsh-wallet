@@ -18,9 +18,12 @@
  *   model provider and stored in session logs); backups happen in the
  *   settings panel.
  *
- * Parameters use the DSH parameter DSL: an open object root whose properties
- * carry `{ type, description?, required?, enum? }`; requiredness is a
- * per-property `required: true` annotation.
+ * Tools are authored in the DSH parameter DSL (an open object root whose
+ * properties carry `{ type, description?, required?, enum? }`) and registered
+ * as wire-level JSON Schema (`{ type: 'object', properties, required }`), the
+ * same projection `defineTool()` performs. `ctx.tools.register()` stores the
+ * definition as-is, so a DSL root would reach the model provider without
+ * `type: "object"` — strict providers (DeepSeek) reject that.
  *
  * @module dsh-web3/tools
  */
@@ -54,14 +57,55 @@ export interface ParamSpec {
   examples?: unknown;
 }
 
-/** Tool parameter schema (open object root). */
+/** Tool parameter schema in the DSL (open object root). */
 export type ToolParameters = Record<string, ParamSpec>;
 
-/** A single model tool, DSH `ToolDefinition`-shaped. */
+/** One property of the wire-level JSON Schema. */
+export interface JsonSchemaProperty {
+  /** Absent for `json` (any JSON value). */
+  type?: string;
+  description?: string;
+  enum?: unknown[];
+  examples?: unknown;
+  items?: { type: string };
+}
+
+/** Wire-level parameter schema: an object root, as `defineTool()` projects it. */
+export interface ParametersJsonSchema {
+  type: 'object';
+  properties: Record<string, JsonSchemaProperty>;
+  required?: string[];
+}
+
+/**
+ * Project DSL parameters onto JSON Schema exactly like DSH's
+ * `parameterSchemaSpecToJsonSchema`: `json` becomes an untyped (any) schema,
+ * `required: true` moves into the root `required` list.
+ */
+export function toParametersJsonSchema(parameters: ToolParameters): ParametersJsonSchema {
+  const properties: Record<string, JsonSchemaProperty> = {};
+  const required: string[] = [];
+  for (const [key, spec] of Object.entries(parameters)) {
+    properties[key] = {
+      ...(spec.type !== 'json' ? { type: spec.type } : {}),
+      ...(spec.description !== undefined ? { description: spec.description } : {}),
+      ...(spec.enum !== undefined ? { enum: spec.enum } : {}),
+      ...(spec.examples !== undefined ? { examples: spec.examples } : {}),
+      ...(spec.items !== undefined ? { items: { ...spec.items } } : {}),
+    };
+    if (spec.required === true) required.push(key);
+  }
+  return { type: 'object', properties, ...(required.length > 0 ? { required } : {}) };
+}
+
+/** A tool as authored (DSL parameters). */
+type ToolSpec = Omit<WalletTool, 'parameters'> & { parameters: ToolParameters };
+
+/** A single model tool, DSH `ToolDefinition`-shaped (JSON Schema parameters). */
 export interface WalletTool {
   name: string;
   description: string;
-  parameters: ToolParameters;
+  parameters: ParametersJsonSchema;
   execute(args: Record<string, unknown>, ctx: ToolCallContext): Promise<unknown>;
   output: {
     schema: { type: 'object' };
@@ -168,7 +212,7 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
   const panelBackupMessage =
     '出于安全考虑，助记词/私钥不会通过对话返回（对话内容会发送给模型服务并写入会话日志）。请引导用户前往 DSH 设置 → Web3 → 账户，点击对应账户的「备份」，在界面中输入 PIN 后查看。';
 
-  const tools: WalletTool[] = [
+  const specs: ToolSpec[] = [
     // ── status & session ────────────────────────────────────────────────
     {
       name: 'wallet_status',
@@ -786,11 +830,14 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
     },
   ];
 
-  for (const tool of tools) {
-    const present = PRESENTERS[tool.name];
-    if (present !== undefined) tool.presentCall = (args) => ({ card: 'generic', ...present(asRecord(args)) });
-  }
-  return tools;
+  return specs.map((spec): WalletTool => {
+    const present = PRESENTERS[spec.name];
+    return {
+      ...spec,
+      parameters: toParametersJsonSchema(spec.parameters),
+      ...(present !== undefined ? { presentCall: (args: unknown) => ({ card: 'generic' as const, ...present(asRecord(args)) }) } : {}),
+    };
+  });
 }
 
 // ── tool-card presentation (DSH UI; never model-visible) ─────────────────

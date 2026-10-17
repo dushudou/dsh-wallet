@@ -3,7 +3,7 @@
  * safety, structured errors, guardrails, and secret isolation.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AbiCoder, Interface, Transaction, MaxUint256 } from 'ethers';
@@ -317,7 +317,129 @@ describe('gates and guardrails', () => {
     const result = await run('wallet_transfer', { account: 'main', chainId: 8453, to: ALICE, amount: '0.01' });
     expect(result).toMatchObject({ ok: false, code: 'VAULT_LOCKED' });
     expect(String(result.hint)).toContain('wallet_unlock');
+    expect(String(result.message)).toContain('locked by the user');
     expect(approval.requests).toHaveLength(0);
+  });
+
+  it('re-opens a vault that locked itself (idle, restart) when signing, and audits it', async () => {
+    service.vault.lock();
+    const result = await run('wallet_transfer', { account: 'main', chainId: 8453, to: ALICE, amount: '0.01' });
+    expect(result.status).toBe('signed-broadcast');
+    const unlocked = (await service.recentAudit(50)).filter((e) => e.kind === 'vault.unlocked');
+    expect(unlocked.at(-1)?.detail).toMatchObject({ source: 'env', trigger: 'signing' });
+  });
+
+  it('shares one automatic unlock between concurrent signing requests', async () => {
+    service.vault.lock();
+    const [a, b] = await Promise.all([
+      service.signMessage({ account: accountId, message: 'a' }, approval),
+      service.signMessage({ account: accountId, message: 'b' }, approval),
+    ]);
+    expect([a.status, b.status]).toEqual(['signed', 'signed']);
+    expect((await service.recentAudit(50)).filter((e) => e.kind === 'vault.unlocked' && e.detail.trigger === 'signing')).toHaveLength(1);
+  });
+
+  it('keeps a user lock for other plugins too, with a readable error', async () => {
+    service.lock();
+    await expect(service.signTypedData({ account: accountId, domain: { name: 'X', chainId: 8453 }, types: { M: [{ name: 'v', type: 'uint256' }] }, primaryType: 'M', value: { v: 1 } }, approval))
+      .rejects.toThrow(/locked by the user.*Settings → Web3/);
+    await service.unlock();
+    service.vault.lock();
+    expect((await service.signMessage({ account: accountId, message: 'after' }, approval)).status).toBe('signed');
+  });
+
+  /** A service whose passphrase lookup waits until `release()`; `asked` resolves once the lookup started. */
+  function gatedService(): { slow: WalletService; asked: Promise<void>; release: () => void } {
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const asked = new Promise<void>((resolve) => (started = resolve));
+    const slow = new WalletService(service.vault, {
+      vaultPath: dir, passphraseMode: 'manual', env: {}, rpcOverrides: {}, tokens: {}, createProvider: () => provider,
+      credentials: { resolve: async () => { started(); await gate; return { value: 'pw', source: 'env' }; }, set: async () => undefined },
+    });
+    return { slow, asked, release };
+  }
+
+  it('a user lock during an automatic unlock wins: the keys are dropped and nothing is signed', async () => {
+    const { slow, asked, release } = gatedService();
+    service.vault.lock();
+    const signing = slow.signMessage({ account: accountId, message: 'x' }, approval);
+    await asked;
+    slow.lock();
+    release();
+    await expect(signing).rejects.toThrow(/locked by the user/);
+    expect(service.vault.unlocked).toBe(false);
+    expect(approval.requests).toHaveLength(0);
+  });
+
+  it('a user lock during an explicit unlock wins and stays saved', async () => {
+    const { slow, asked, release } = gatedService();
+    service.vault.lock();
+    const unlocking = slow.unlock();
+    await asked;
+    slow.lock();
+    release();
+    await expect(unlocking).rejects.toThrow(/locked by the user/);
+    expect(slow.status()).toMatchObject({ unlocked: false, lockedByUser: true });
+  });
+
+  it('creating or importing an account does not lift a user lock', async () => {
+    service.lock();
+    await run('wallet_create', { label: 'second' });
+    const secretFile = join(dir, 'pk.txt');
+    await writeFile(secretFile, '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d', { mode: 0o600 });
+    await service.importAccount({ source: 'privateKey', secretFile, label: 'third' });
+    expect(service.listAccounts()).toHaveLength(3);
+    expect(service.vault.unlocked).toBe(false);
+    expect(service.status().lockedByUser).toBe(true);
+    await expect(service.signMessage({ account: accountId, message: 'x' }, approval)).rejects.toThrow(/locked by the user/);
+  });
+
+  it('keeps a user lock across a restart until an explicit unlock', async () => {
+    service.lock();
+    const reopen = async () => new WalletService(await WalletVault.open({ directory: dir, kdf: { N: 1024, r: 8, p: 1 } }), {
+      vaultPath: dir, passphraseMode: 'manual', env: { [WALLET_PASSPHRASE_REF]: 'pw' }, rpcOverrides: {}, tokens: {}, createProvider: () => provider,
+    });
+    const restarted = await reopen();
+    expect(restarted.status()).toMatchObject({ unlocked: false, lockedByUser: true });
+    await expect(restarted.signMessage({ account: accountId, message: 'x' }, approval)).rejects.toThrow(/locked by the user/);
+    await restarted.unlock();
+    expect(restarted.status().lockedByUser).toBe(false);
+    restarted.vault.lock();
+    const fresh = await reopen();
+    expect(fresh.status()).toMatchObject({ unlocked: false, lockedByUser: false });
+    expect((await fresh.signMessage({ account: accountId, message: 'y' }, approval)).status).toBe('signed');
+    fresh.vault.lock();
+  });
+
+  it('an explicit unlock that cannot clear the saved lock fails closed', async () => {
+    service.vault.lock();
+    await mkdir(join(dir, 'user-lock.json'));
+    await expect(service.unlock()).rejects.toThrow();
+    expect(service.status()).toMatchObject({ unlocked: false, lockedByUser: true });
+    await rm(join(dir, 'user-lock.json'), { recursive: true });
+  });
+
+  it('reports a user lock that could not be saved, and still holds it in memory', async () => {
+    const unsaved = new WalletService(service.vault, {
+      vaultPath: join(dir, 'missing'), passphraseMode: 'manual', env: { [WALLET_PASSPHRASE_REF]: 'pw' }, rpcOverrides: {}, tokens: {}, createProvider: () => provider,
+    });
+    expect(() => unsaved.lock()).toThrow(/could not be saved/);
+    expect(unsaved.status()).toMatchObject({ unlocked: false, lockedByUser: true });
+    await expect(unsaved.signMessage({ account: accountId, message: 'x' }, approval)).rejects.toThrow(/locked by the user/);
+  });
+
+  it('re-opens an idle-locked vault for signing only, not for exports', async () => {
+    service.vault.lock();
+    await expect(service.exportKeystore(accountId, 'ks-pass')).rejects.toThrow(/wallet vault is locked/);
+    expect(service.vault.unlocked).toBe(false);
+  });
+
+  it('says why when the vault cannot be re-opened automatically', async () => {
+    const bare = new WalletService(service.vault, { vaultPath: dir, passphraseMode: 'manual', env: {}, rpcOverrides: {}, tokens: {}, createProvider: () => provider });
+    service.vault.lock();
+    await expect(bare.signMessage({ account: accountId, message: 'x' }, approval)).rejects.toThrow(/could not be unlocked automatically/);
   });
 
   it('never auto-signs token transfers under a native-value allow rule (power preset)', async () => {

@@ -48,7 +48,7 @@ dsh plugin --profile web add dsh-web3
 - id: web3
   config:
     vaultPath: ~/.dsh-web3       # 保险库目录（默认 ~/.dsh-web3）
-    autoLockMs: 900000           # 闲置 15 分钟后锁定
+    autoLockMs: 900000           # 闲置 15 分钟后锁定（签名时自动解锁；手动锁定会保持）
     passphrase:
       mode: auto                 # auto | env | manual
     secretStore: auto            # auto（macOS 上用钥匙串）| keychain | none

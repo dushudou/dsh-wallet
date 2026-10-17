@@ -2,6 +2,12 @@
 
 All notable changes to `dsh-web3` (the DSH bundle) and `dsh-web3-core` (the library). Dates are npm publish dates. The project follows [Semantic Versioning](https://semver.org/); while in `0.x`, a minor version may contain breaking changes, which are listed under **Breaking**.
 
+## dsh-web3 0.9.2 — 2026-10-17
+
+### Fixed
+
+- Signing failed with a bare `wallet vault is locked` after the vault auto-locked (15 minutes idle) or the host restarted, including for other plugins that sign through the wallet service (dsh-hyperliquid orders, leverage and transfers). Signing now re-opens such a vault from the stored passphrase, audited as `vault.unlocked` with `trigger: "signing"`; policy, limits, PIN and approvals still apply. A lock the user chose (panel or `wallet_lock`) is kept until an explicit unlock, also across a restart (`user-lock.json` in the vault directory) and when an account is created or imported; a lock during an automatic unlock wins. The error now says the user locked it and where to unlock, and a vault that cannot be re-opened says why. The vault status reports `lockedByUser`, and the panel's lock banner shows only for a user lock.
+
 ## dsh-web3 0.9.1 — 2026-10-17
 
 ### Changed

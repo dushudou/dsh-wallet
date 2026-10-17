@@ -24,6 +24,7 @@
 
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { MaxUint256, TypedDataEncoder, getAddress, formatEther, formatUnits, hashMessage, keccak256 } from 'ethers';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -33,6 +34,7 @@ import {
   JsonRpcChainProvider,
   PinGuard,
   WalletVault,
+  VaultLockedError,
   accountBalances,
   classifyTransaction,
   classifyTypedData,
@@ -290,6 +292,12 @@ export class WalletService {
   private accountLocks = new Map<string, Promise<unknown>>();
   /** TTL cache for network security lookups (sanctions oracle, GoPlus). */
   private securityCache = new Map<string, { at: number; value: unknown }>();
+  /** Set by lock() (the user via the panel or wallet_lock), cleared by an explicit unlock. Mirrored in USER_LOCK_FILE. */
+  private lockedByUser = false;
+  /** Bumped by every lock(): an unlock that started before it must not survive it. */
+  private lockEpoch = 0;
+  /** In-flight automatic unlock, shared by concurrent signing requests. */
+  private autoUnlocking: Promise<void> | undefined;
 
   constructor(vault: WalletVault, options: WalletServiceOptions) {
     this.vault = vault;
@@ -308,9 +316,10 @@ export class WalletService {
   // ── vault ───────────────────────────────────────────────────────────────
 
   /** Vault status snapshot. */
-  status(): ReturnType<WalletVault['status']> {
+  status(): ReturnType<WalletVault['status']> & { lockedByUser: boolean } {
     this.vault.maybeAutoLock();
-    return this.vault.status();
+    // Only a user lock stops signing; an idle lock re-opens on the next signature.
+    return { ...this.vault.status(), lockedByUser: !this.vault.unlocked && this.userLocked() };
   }
 
   /** List accounts (metadata only). */
@@ -319,7 +328,8 @@ export class WalletService {
   }
 
   /** Unlock the vault using the passphrase resolution chain. */
-  async unlock(passphraseFile?: string): Promise<{ source: string }> {
+  async unlock(passphraseFile?: string, trigger?: 'signing'): Promise<{ source: string }> {
+    const epoch = this.lockEpoch;
     const { passphraseFromFile } = await import('./passphrase.js');
     let passphrase: string;
     let source: string;
@@ -331,25 +341,84 @@ export class WalletService {
       passphrase = resolved.passphrase;
       source = resolved.source;
     }
-    await this.vault.unlock(passphrase);
-    await this.vault.auditAppend('vault.unlocked', { source });
+    // Only an explicit unlock lifts the user's lock; signing never reaches here while it is set.
+    if (!(await this.openVault(passphrase, epoch, trigger === undefined))) throw new VaultLockedError(LOCKED_BY_USER);
+    await this.vault.auditAppend('vault.unlocked', { source, ...(trigger !== undefined ? { trigger } : {}) });
     return { source };
   }
 
   /**
-   * Require an unlocked vault. A lock is an explicit user choice, so signing
-   * paths never silently unlock; they fail fast — before any PIN check or
-   * approval prompt — and the agent calls wallet_unlock.
+   * Decrypt the keys unless lock() ran since `epoch`; then the keys are dropped
+   * again and false is returned. `liftUserLock` clears the user's lock in the
+   * same synchronous step as the epoch check, so a later lock() always wins.
    */
+  private async openVault(passphrase: string, epoch: number, liftUserLock = false): Promise<boolean> {
+    await this.vault.unlock(passphrase);
+    if (epoch !== this.lockEpoch) {
+      this.vault.lock();
+      return false;
+    }
+    if (liftUserLock) {
+      try {
+        rmSync(join(this.options.vaultPath, USER_LOCK_FILE), { force: true });
+      } catch (error) {
+        // A marker left behind would lock again after a restart: fail closed.
+        this.vault.lock();
+        throw error;
+      }
+      this.lockedByUser = false;
+    }
+    return true;
+  }
+
+  /** Whether the user locked the vault — in this process or before a restart. */
+  private userLocked(): boolean {
+    return this.lockedByUser || existsSync(join(this.options.vaultPath, USER_LOCK_FILE));
+  }
+
+  /** Require an unlocked vault (account management, exports). */
   private requireUnlocked(): void {
     this.vault.maybeAutoLock();
     this.vault.ensureUnlocked();
   }
 
+  /**
+   * Require an unlocked vault for signing, before any PIN check or approval
+   * prompt. A vault that locked itself (idle timeout, host restart) is
+   * re-opened from the stored passphrase — the agent could call wallet_unlock
+   * anyway, and policy, limits, PIN and approvals still apply. A lock the user
+   * chose stays, across restarts, until an explicit unlock: signing fails with
+   * a message saying who has to unlock.
+   */
+  private async requireSigningUnlocked(): Promise<void> {
+    this.vault.maybeAutoLock();
+    if (!this.vault.unlocked) {
+      if (this.userLocked()) throw new VaultLockedError(LOCKED_BY_USER);
+      this.autoUnlocking ??= this.unlock(undefined, 'signing')
+        .then(() => undefined)
+        .finally(() => (this.autoUnlocking = undefined));
+      try {
+        await this.autoUnlocking;
+      } catch (error) {
+        throw error instanceof VaultLockedError ? error : new VaultLockedError(lockedAutoFailed(error));
+      }
+      if (!this.vault.unlocked && this.userLocked()) throw new VaultLockedError(LOCKED_BY_USER);
+    }
+    this.vault.ensureUnlocked();
+  }
+
   /** Lock the vault (zeroize decrypted key material) and revoke daily PIN. */
   lock(): void {
+    this.lockEpoch += 1;
+    this.lockedByUser = true;
     this.vault.lock();
     void this.pinReady.then(() => this.pin.clearDaily()).catch(() => undefined);
+    try {
+      writeFileSync(join(this.options.vaultPath, USER_LOCK_FILE), JSON.stringify({ lockedAt: new Date().toISOString() }), { mode: 0o600 });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`The wallet is locked, but the lock could not be saved (${reason}): it lasts until DSH restarts.`);
+    }
   }
 
   // ── daily PIN gate ──────────────────────────────────────────────────────
@@ -392,9 +461,11 @@ export class WalletService {
   /** Create a fresh HD account. The mnemonic is returned ONCE (never stored
    *  in plaintext, never logged); callers must gate display on approval. */
   async createAccount(input: { label?: string; words?: 12 | 15 | 18 | 21 | 24 } = {}): Promise<{ meta: AccountMeta; mnemonic: string }> {
+    const epoch = this.lockEpoch;
     const passphrase = await this.effectivePassphrase();
     const result = await this.vault.createAccount(input, passphrase);
-    if (!this.vault.unlocked) await this.vault.unlock(passphrase);
+    // A user lock stays: the new key file is written, the vault is not opened.
+    if (!this.vault.unlocked && !this.userLocked()) await this.openVault(passphrase, epoch);
     return result;
   }
 
@@ -418,6 +489,7 @@ export class WalletService {
     index?: number;
   }): Promise<{ meta: AccountMeta }> {
     const { readSecretFile } = await import('./secretFile.js');
+    const epoch = this.lockEpoch;
     const passphrase = await this.effectivePassphrase();
     const secret = await readSecretFile(input.secretFile);
     let result: { meta: AccountMeta };
@@ -438,7 +510,7 @@ export class WalletService {
         passphrase,
       );
     }
-    if (!this.vault.unlocked) await this.vault.unlock(passphrase);
+    if (!this.vault.unlocked && !this.userLocked()) await this.openVault(passphrase, epoch);
     return result;
   }
 
@@ -1050,7 +1122,7 @@ export class WalletService {
     }
     // Lock + PIN before approval: never ask the human to approve something
     // the vault lock or the daily PIN gate would then refuse.
-    this.requireUnlocked();
+    await this.requireSigningUnlocked();
     await this.pinGate();
     if (decision.effect === 'ask') {
       if (approval === undefined) return (plan.result = { status: 'unavailable-approver', decision, summary: plan.headline, security });
@@ -1074,7 +1146,7 @@ export class WalletService {
       }
     }
 
-    this.requireUnlocked();
+    await this.requireSigningUnlocked();
     const unlocked = await this.vault.unlockedAccount(account.id);
     const signed = await coreSignTransaction(unlocked.wallet, populated);
     await this.vault.auditAppend('sign.transaction', {
@@ -1351,7 +1423,7 @@ export class WalletService {
       messageHash,
     });
     if (decision.effect === 'deny') return { status: 'denied-by-policy', decision, address: meta.address };
-    this.requireUnlocked();
+    await this.requireSigningUnlocked();
     await this.pinGate();
     if (decision.effect === 'ask') {
       if (approval === undefined) return { status: 'unavailable-approver', decision, address: meta.address };
@@ -1367,7 +1439,7 @@ export class WalletService {
         return { status: 'awaiting-approval-rejected', decision, approvalOutcome: outcome, address: meta.address };
       }
     }
-    this.requireUnlocked();
+    await this.requireSigningUnlocked();
     const account = await this.vault.unlockedAccount(meta.id);
     const { signature } = await coreSignMessage(account.wallet, input.message);
     await this.vault.auditAppend('sign.message', { ...trail, accountId: meta.id, address: meta.address, messageHash, signature });
@@ -1440,7 +1512,7 @@ export class WalletService {
       await this.holdForUser(meta, decision, intent.kind, trail);
       return { status: 'needs-human', decision, address: meta.address, intent, security };
     }
-    this.requireUnlocked();
+    await this.requireSigningUnlocked();
     await this.pinGate();
     if (decision.effect === 'ask') {
       if (approval === undefined) return { status: 'unavailable-approver', decision, address: meta.address, intent, security };
@@ -1456,7 +1528,7 @@ export class WalletService {
         return { status: 'awaiting-approval-rejected', decision, approvalOutcome: outcome, address: meta.address, intent, security };
       }
     }
-    this.requireUnlocked();
+    await this.requireSigningUnlocked();
     const account = await this.vault.unlockedAccount(meta.id);
     const { signature } = await coreSignTypedData(account.wallet, domain, types, input.value);
     await this.vault.auditAppend('sign.typedData', { ...trail, accountId: meta.id, address: meta.address, digest, signature, intent: intent.kind });
@@ -2255,6 +2327,17 @@ function isBudgetHold(decision: PolicyDecision, security: SecurityView): boolean
 
 const NEEDS_HUMAN_NEXT =
   'This is above the automatic budget, so nothing was signed. Tell the user the amount and why. To let it through they can raise the automatic budget in DSH Settings → Web3 → Limits, or switch the security mode there (strict asks per operation). Retry once only after the user says they changed it; never split the amount to fit the budget.';
+
+/** Marks a lock the user chose, so it survives a host restart (removed by an explicit unlock). */
+const USER_LOCK_FILE = 'user-lock.json';
+
+const LOCKED_BY_USER =
+  'The Web3 wallet was locked by the user, so nothing was signed. Ask the user to unlock it in DSH Settings → Web3 (or whether you may call wallet_unlock), then retry the same call.';
+
+function lockedAutoFailed(error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  return `The Web3 wallet is locked and could not be unlocked automatically (${reason}), so nothing was signed. Ask the user to unlock it in DSH Settings → Web3, then retry the same call.`;
+}
 
 function attempt<T>(fn: () => T): T | undefined {
   try {

@@ -73,7 +73,7 @@ whenToUse: 用户提到钱包、余额、转账、付款、收款、代币、USD
 ### 转账（最常见）
 
 ```text
-1. wallet_status                          # 锁定? → wallet_unlock
+1. wallet_status                          # lockedByUser? → 先问用户；仅闲置锁定会在签名时自动解锁
 2. wallet_transfer {account, chainId, to, amount, token, dryRun: true, idempotencyKey}
    → status "prepared"：summary / security / willRequire / preparedId
 3. 告诉用户：summary + 全部 security.findings + 需要的动作
@@ -161,7 +161,7 @@ whenToUse: 用户提到钱包、余额、转账、付款、收款、代币、USD
 
 | code | 处理 |
 |---|---|
-| `VAULT_LOCKED` | `wallet_unlock` 后重试同一调用 |
+| `VAULT_LOCKED` | 用户手动锁定的：告诉用户，经同意或用户在面板解锁后重试；其他情况 `wallet_unlock` 后重试同一调用 |
 | `ACCOUNT_NOT_FOUND` | `wallet_list`，用 id / 地址 / 精确标签 |
 | `INVALID_ADDRESS` / `INVALID_RECIPIENT` | 请用户重新提供完整地址或保存联系人；不要自己修正 |
 | `INVALID_AMOUNT` | 用纯小数字符串（`"12.5"`），不带逗号/单位/科学计数法；不超过代币精度 |
@@ -209,5 +209,5 @@ whenToUse: 用户提到钱包、余额、转账、付款、收款、代币、USD
 - **放宽只在面板**：Agent 只能收紧安全设置；放宽、加白名单、查看助记词、导出、删除账户都在设置面板完成，并要求输入 PIN。
 - **每日 PIN**：敏感操作每天首次需在设置面板输入 PIN。钱包会先检查 PIN，再弹审批框。
 - **人工审批框**展示完整地址（不截断）、真实金额、手续费上限、所有风险提示。
-- **自动锁定**：闲置后自动锁定；锁定时签名操作直接返回 `VAULT_LOCKED`。
+- **自动锁定**：闲置后自动锁定，私钥不留在内存里。签名时如果是闲置或重启导致的锁定，会用已保存的口令自动解锁（审计记为 `vault.unlocked`，`trigger: "signing"`），策略、限额、PIN、审批照常生效。用户手动锁定（面板或 `wallet_lock`）后签名直接返回 `VAULT_LOCKED`，重启后也保持，直到显式解锁；先问用户再解锁。`wallet_status` 的 `lockedByUser` 表示是否为用户锁定。
 - **审计日志**：所有决策、审批、签名与设置变更都记录在 `wallet_audit_log`，不含密钥。同一次签名请求的各条记录（`sign.decision` / `sign.approval` / `sign.needs-human` / `sign.transaction` / `sign.message` / `sign.typedData`）共用一个 `requestId`，并带有发起工具（`via`）和当时的安全模式（`preset`）；被签内容的哈希：消息的 `messageHash` 与 EIP-712 的 `digest` 记在 `sign.decision` 和签名条目里，交易的 `nonce` / `dataHash` / `txHash` 记在 `sign.transaction` 里（审批条目没有哈希）；交易可按 `txHash` 对到 `sign.broadcast`。用户问“这笔是怎么签出去的”时按 `requestId` 讲清整条链路。

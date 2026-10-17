@@ -103,7 +103,7 @@ export function toToolError(error: unknown): ToolErrorResult {
     return { ok: false, status: 'pin-locked', code: 'PIN_LOCKED', message: PIN_LOCKED_MESSAGE, hint: 'Do not retry today.' };
   }
   if (error instanceof VaultLockedError) {
-    return { ok: false, status: 'error', code: 'VAULT_LOCKED', message: error.message, hint: 'Call wallet_unlock, then retry the same call.' };
+    return { ok: false, status: 'error', code: 'VAULT_LOCKED', message: error.message, hint: 'Follow the message: if the user locked the wallet, ask them before unlocking; otherwise call wallet_unlock, then retry the same call.' };
   }
   if (error instanceof AccountNotFoundError) {
     return {

@@ -223,7 +223,7 @@ window.__ModuleLoader__.load({
 				welcomeText: "密钥只加密保存在本机。Agent 可以帮你查询和发起交易，但每一笔都受安全模式、限额和你的审批约束。",
 				createWallet: "创建新钱包", importWallet: "导入钱包",
 				// banners
-				bannerLocked: "钱包已锁定，签名操作暂不可用。", unlock: "解锁", lock: "锁定",
+				bannerLocked: "你锁定了钱包，解锁前不会签名。", unlock: "解锁", lock: "锁定",
 				bannerNoPin: "还没有设置 PIN。设置后才能查看助记词、导出、删除账户和放宽限额。", setPin: "设置 PIN",
 				bannerBackup: "有账户还没有备份助记词，设备丢失将无法找回资产。", backupNow: "去备份",
 				bannerPinToday: "今日尚未验证 PIN，Agent 发起的签名会先要求验证。", verifyPin: "验证 PIN",
@@ -311,7 +311,7 @@ window.__ModuleLoader__.load({
 				welcomeTitle: "Set up your Web3 wallet",
 				welcomeText: "Keys stay encrypted on this machine. The agent can look things up and start transactions, but every one is bound by your security mode, limits, and approvals.",
 				createWallet: "Create a new wallet", importWallet: "Import a wallet",
-				bannerLocked: "The wallet is locked; signing is unavailable.", unlock: "Unlock", lock: "Lock",
+				bannerLocked: "You locked the wallet; nothing is signed until you unlock it.", unlock: "Unlock", lock: "Lock",
 				bannerNoPin: "No PIN yet. You need one to view recovery phrases, export, remove accounts, or loosen limits.", setPin: "Set PIN",
 				bannerBackup: "Some accounts are not backed up. Losing this device would lose their funds.", backupNow: "Back up",
 				bannerPinToday: "PIN not verified today; agent-started signing will ask for it first.", verifyPin: "Verify PIN",
@@ -616,7 +616,7 @@ window.__ModuleLoader__.load({
 			const data = props.data;
 			const items = [];
 			const unbacked = data.accounts.some((a) => a.mnemonicId !== undefined && a.backedUp !== true);
-			if (!data.status.unlocked) {
+			if (!data.status.unlocked && data.status.lockedByUser) {
 				items.push(h(Banner, { key: "lock", text: t("bannerLocked"), action: h(Btn, { variant: "primary", disabled: props.busy, onClick: props.onUnlock }, t("unlock")) }));
 			}
 			if (!data.pin.enabled) {

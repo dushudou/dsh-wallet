@@ -48,7 +48,7 @@ Override the `web3` row in your profile's `cordis.patch.yml`. Every field is opt
 - id: web3
   config:
     vaultPath: ~/.dsh-web3       # vault directory (default ~/.dsh-web3)
-    autoLockMs: 900000           # lock after 15 minutes idle
+    autoLockMs: 900000           # lock after 15 minutes idle (signing re-opens it; a lock you choose stays)
     passphrase:
       mode: auto                 # auto | env | manual
     secretStore: auto            # auto (macOS Keychain on macOS) | keychain | none

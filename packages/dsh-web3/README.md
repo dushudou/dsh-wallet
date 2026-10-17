@@ -77,8 +77,8 @@ Override the `web3` row in your profile's `cordis.patch.yml`. Every field is opt
 | Assets | Account and network picker, receiving address, balances, recent transactions, setup reminders |
 | Accounts | Create, import (phrase / key / keystore), back up, rename, export keystore, remove |
 | Security | Lock / unlock, PIN, pre-signing checks and feed status, denylist, agent permissions |
-| Limits | Security mode (presets), spending caps with today's usage, transfer whitelist and contacts, policy rules |
-| Activity | Transaction history with explorer links, audit log |
+| Limits | Security mode (presets, including semi- and fully managed), spending caps (the hard ceiling) with today's usage, the semi-managed automatic budget, transfer whitelist and contacts, policy rules |
+| Activity | Transaction history with explorer links, audit log (entries of one signing request share a `requestId`) |
 
 Anything that weakens protection or exposes keys — loosening a preset or a limit, whitelisting, switching a security check off, removing a denylisted address, revealing a recovery phrase, exporting, removing an account — asks for the PIN. Tightening never asks.
 
@@ -86,8 +86,8 @@ Anything that weakens protection or exposes keys — loosening a preset or a lim
 
 | Preset | Signs on its own | Asks you |
 |---|---|---|
-| `strict` (recommended) | nothing | everything |
-| `agent-semi` (new wallets) | everything under the automatic budget, within the security checks | above the automatic budget: held for you (`needs-human`, nothing signed); high-severity findings and unlimited approvals ask; above the hard ceiling: refused |
+| `agent-semi` (recommended, new wallets) | everything under the automatic budget, within the security checks | above the automatic budget: not signed; returns `needs-human` so the agent tells you, and it runs once you raise the budget or switch modes; high-severity findings and unlimited approvals ask; above the hard ceiling: refused |
+| `strict` | nothing | everything |
 | `agent-full` | everything under the hard ceiling, within the security checks | above the hard ceiling: refused (raise it in Settings → Web3 → Limits); high-severity findings and unlimited approvals ask |
 | `micropay` | x402 USDC payments ≤ 1 each, ≤ 10 a day, after a merchant's first payment | everything else |
 | `testnet` | small testnet operations | mainnet |
@@ -95,6 +95,10 @@ Anything that weakens protection or exposes keys — loosening a preset or a lim
 | `locked` | nothing (refuses everything) | — |
 
 Hard limits (stablecoin and native caps, transfer whitelist) and critical security findings refuse a request even after you click approve.
+
+The automatic budget (`auto` in `limits.json`, by default a tenth of the hard ceiling) applies to `agent-semi` only and is edited in Settings → Web3 → Limits → Automatic budget: a blank item has no automatic budget (only the hard ceiling applies); 0 never signs that item automatically. Raising or clearing it asks for the PIN.
+
+In the audit log (`audit/audit-<date>.jsonl`) the decision, approval, hold and signature entries of one signing request share a `requestId` and record the tool that started it (`via`), the preset in force (`preset`) and a hash of what was signed (message hash, EIP-712 digest, transaction nonce / calldata hash / txHash).
 
 ### Service API (`ctx.wallet`)
 

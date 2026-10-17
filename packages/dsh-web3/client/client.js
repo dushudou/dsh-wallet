@@ -266,7 +266,9 @@ window.__ModuleLoader__.load({
 				agentApproval: "每笔交易人工审批", agentApprovalHint: "由下方「限额 → 安全模式」决定哪些操作需要你确认。",
 				// limits
 				presetSection: "安全模式", presetDesc: "决定哪些操作可以自动签名，哪些需要你确认。",
-				preset_strict: "严格（推荐）", preset_strictDesc: "每一笔签名都需要你在审批框确认。",
+				"preset_agent-semi": "半托管（推荐）", "preset_agent-semiDesc": "Agent 在自动预算内自行签名；超出自动预算的操作不签名并告诉你，需要你调高自动预算或切换模式后再执行；超出硬性上限直接拒绝。严重风险拒绝，高风险和无限额授权需确认。",
+				"preset_agent-full": "全托管", "preset_agent-fullDesc": "Agent 在硬性上限内自行签名，不设自动预算；超出上限直接拒绝。严重风险拒绝，高风险和无限额授权需确认。",
+				preset_strict: "严格", preset_strictDesc: "每一笔签名都需要你在审批框确认。",
 				preset_micropay: "小额支付", preset_micropayDesc: "在严格模式基础上，x402 小额 USDC 付款（≤1/笔，≤10/天）自动完成；新商户首次付款仍需确认。",
 				preset_testnet: "测试网自治", preset_testnetDesc: "测试网上小额操作自动签名，主网仍逐笔确认。",
 				preset_power: "进阶", preset_powerDesc: "主网小额原生币转账（≤0.01/笔，≤0.05/天）自动签名；代币和授权仍需确认。",
@@ -280,6 +282,7 @@ window.__ModuleLoader__.load({
 				usdPerTx: "稳定币 · 单笔", usdPerDay: "稳定币 · 每日", usdHint: "USDC / USDT / DAI 按 1 美元计，跨链合计。",
 				nativePerTx: "{s} · 单笔", nativePerDay: "{s} · 每日", nativeHint: "覆盖所有以 {s} 为原生币的网络。",
 				usedToday: "今日已用 {v}", includeTestnets: "测试网也适用", capsSaved: "上限已保存", unlimited: "不限",
+				autoSection: "自动预算", autoDesc: "半托管模式下，Agent 在此预算内自动签名；超出预算但未超硬性上限的操作不会签名，Agent 会告诉你，调高预算后可再执行。留空表示该项不设自动预算，只受硬性上限约束；填 0 表示该项每次都不自动签名。", autoInactive: "当前安全模式不使用自动预算，切换到半托管后生效。", autoSaved: "自动预算已保存",
 				advanced: "策略规则", advancedShow: "查看 {n} 条规则", advancedHide: "收起",
 				// activity
 				activityTx: "交易", activityAudit: "审计日志", txEmpty: "钱包还没有发出过交易。", auditEmpty: "暂无记录。", explorer: "浏览器",
@@ -347,7 +350,9 @@ window.__ModuleLoader__.load({
 				agentLoosen: "The agent can only tighten security", agentLoosenHint: "Loosening the security mode, raising limits, and whitelisting happen only here, confirmed with your PIN.",
 				agentApproval: "Human approval per transaction", agentApprovalHint: "Limits → Security mode decides which operations need your confirmation.",
 				presetSection: "Security mode", presetDesc: "Decides what can be signed automatically and what needs your confirmation.",
-				preset_strict: "Strict (recommended)", preset_strictDesc: "Every signature waits for your approval.",
+				"preset_agent-semi": "Semi-managed (recommended)", "preset_agent-semiDesc": "The agent signs on its own within the automatic budget; anything above it is not signed and is reported to you, to run once you raise the budget or switch modes; anything above the hard limits is refused. Critical risks are refused; high risks and unlimited approvals ask.",
+				"preset_agent-full": "Fully managed", "preset_agent-fullDesc": "The agent signs on its own up to the hard limits, with no automatic budget; anything above them is refused. Critical risks are refused; high risks and unlimited approvals ask.",
+				preset_strict: "Strict", preset_strictDesc: "Every signature waits for your approval.",
 				preset_micropay: "Micropayments", preset_micropayDesc: "Strict, plus small x402 USDC payments (≤1 each, ≤10 a day) go through automatically; a new merchant's first payment still asks.",
 				preset_testnet: "Testnet autonomy", preset_testnetDesc: "Small testnet operations sign automatically; mainnet still asks every time.",
 				preset_power: "Power", preset_powerDesc: "Small mainnet native transfers (≤0.01 each, ≤0.05 a day) sign automatically; tokens and approvals still ask.",
@@ -361,6 +366,7 @@ window.__ModuleLoader__.load({
 				usdPerTx: "Stablecoins · per transfer", usdPerDay: "Stablecoins · per day", usdHint: "USDC / USDT / DAI count as $1, summed across chains.",
 				nativePerTx: "{s} · per transfer", nativePerDay: "{s} · per day", nativeHint: "Covers every network whose native coin is {s}.",
 				usedToday: "Used today: {v}", includeTestnets: "Apply on testnets too", capsSaved: "Limits saved", unlimited: "No limit",
+				autoSection: "Automatic budget", autoDesc: "In semi-managed mode the agent signs on its own within this budget; anything above it but within the hard limits is not signed and the agent tells you, so you can raise the budget and run it again. Leave blank for no automatic budget on that item (only the hard limits apply); enter 0 to never sign that item automatically.", autoInactive: "The current security mode does not use the automatic budget; it applies once you switch to semi-managed.", autoSaved: "Automatic budget saved",
 				advanced: "Policy rules", advancedShow: "Show {n} rules", advancedHide: "Hide",
 				activityTx: "Transactions", activityAudit: "Audit log", txEmpty: "This wallet has not sent any transactions.", auditEmpty: "Nothing yet.", explorer: "Explorer",
 				st_pending: "Pending", st_success: "Success", st_reverted: "Failed", st_rejected: "Rejected", st_replaced: "Replaced", st_unknown: "Unknown", "st_broadcast-uncertain": "Unconfirmed",
@@ -1129,7 +1135,7 @@ window.__ModuleLoader__.load({
 		}
 
 		// ── Limits ─────────────────────────────────────────────────────────
-		const PRESETS = ["strict", "micropay", "testnet", "power", "locked"];
+		const PRESETS = ["agent-semi", "agent-full", "strict", "micropay", "testnet", "power", "locked"];
 
 		function capText(value) {
 			return value === undefined || value === null ? "" : String(value);
@@ -1141,17 +1147,17 @@ window.__ModuleLoader__.load({
 			const limits = data.limits;
 			const usage = data.usage || { usdSpentToday: "0", nativeSpentToday: {} };
 			const { busy, message, act } = useAction(props.reload);
-			const [caps, setCaps] = React.useState(() => ({
+			const auto = limits.auto || { usd: {}, native: {} };
+			const capsFrom = () => ({
 				usdPerTx: capText(limits.usd.perTx), usdPerDay: capText(limits.usd.perDay),
 				ethPerTx: capText(limits.native.ETH && limits.native.ETH.perTx), ethPerDay: capText(limits.native.ETH && limits.native.ETH.perDay),
 				includeTestnets: limits.includeTestnets === true,
-			}));
+				autoUsdPerTx: capText(auto.usd.perTx), autoUsdPerDay: capText(auto.usd.perDay),
+				autoEthPerTx: capText(auto.native.ETH && auto.native.ETH.perTx), autoEthPerDay: capText(auto.native.ETH && auto.native.ETH.perDay),
+			});
+			const [caps, setCaps] = React.useState(capsFrom);
 			React.useEffect(() => {
-				setCaps({
-					usdPerTx: capText(limits.usd.perTx), usdPerDay: capText(limits.usd.perDay),
-					ethPerTx: capText(limits.native.ETH && limits.native.ETH.perTx), ethPerDay: capText(limits.native.ETH && limits.native.ETH.perDay),
-					includeTestnets: limits.includeTestnets === true,
-				});
+				setCaps(capsFrom());
 			}, [limits.updatedAt]);
 			const [showRules, setShowRules] = React.useState(false);
 			const [contact, setContact] = React.useState(null);
@@ -1172,6 +1178,20 @@ window.__ModuleLoader__.load({
 				if (caps.usdPerTx.trim() !== "") usd.perTx = caps.usdPerTx.trim();
 				if (caps.usdPerDay.trim() !== "") usd.perDay = caps.usdPerDay.trim();
 				void saveLimits(Object.assign({}, limits, { usd, native: nextNative, includeTestnets: caps.includeTestnets }), t("capsSaved"));
+			};
+			const autoDirty = caps.autoUsdPerTx !== capText(auto.usd.perTx) || caps.autoUsdPerDay !== capText(auto.usd.perDay)
+				|| caps.autoEthPerTx !== capText(auto.native.ETH && auto.native.ETH.perTx) || caps.autoEthPerDay !== capText(auto.native.ETH && auto.native.ETH.perDay);
+			const saveAuto = () => {
+				const eth = {};
+				if (caps.autoEthPerTx.trim() !== "") eth.perTx = caps.autoEthPerTx.trim();
+				if (caps.autoEthPerDay.trim() !== "") eth.perDay = caps.autoEthPerDay.trim();
+				const nextNative = Object.assign({}, auto.native);
+				if (eth.perTx !== undefined || eth.perDay !== undefined) nextNative.ETH = eth;
+				else delete nextNative.ETH;
+				const usd = {};
+				if (caps.autoUsdPerTx.trim() !== "") usd.perTx = caps.autoUsdPerTx.trim();
+				if (caps.autoUsdPerDay.trim() !== "") usd.perDay = caps.autoUsdPerDay.trim();
+				void saveLimits(Object.assign({}, limits, { auto: { usd, native: nextNative } }), t("autoSaved"));
 			};
 			const choosePreset = (preset) => {
 				if (preset === data.policy.preset) return;
@@ -1218,6 +1238,15 @@ window.__ModuleLoader__.load({
 					h(Row, { label: t("includeTestnets") }, h(Toggle, { checked: caps.includeTestnets, label: t("includeTestnets"), onChange: (v) => setCaps(Object.assign({}, caps, { includeTestnets: v })) })),
 					h("div", { className: "dshw-actions dshw-actionsEnd", style: { paddingTop: "8px" } },
 						h(Btn, { variant: "primary", disabled: busy || !capsDirty, onClick: saveCaps }, busy ? t("saving") : t("save"))),
+				),
+				h(Section, { title: t("autoSection"), desc: t("autoDesc") },
+					data.policy.preset !== "agent-semi" ? h("div", { className: "dshw-rowHint" }, t("autoInactive")) : null,
+					h(Row, { label: t("usdPerTx"), hint: t("usdHint") }, capInput("autoUsdPerTx", t("usdPerTx")), h("span", { className: "dshw-dim" }, "USD")),
+					h(Row, { label: t("usdPerDay") }, capInput("autoUsdPerDay", t("usdPerDay")), h("span", { className: "dshw-dim" }, "USD")),
+					h(Row, { label: fmt(t("nativePerTx"), { s: "ETH" }), hint: fmt(t("nativeHint"), { s: "ETH" }) }, capInput("autoEthPerTx", "ETH"), h("span", { className: "dshw-dim" }, "ETH")),
+					h(Row, { label: fmt(t("nativePerDay"), { s: "ETH" }) }, capInput("autoEthPerDay", "ETH"), h("span", { className: "dshw-dim" }, "ETH")),
+					h("div", { className: "dshw-actions dshw-actionsEnd", style: { paddingTop: "8px" } },
+						h(Btn, { variant: "primary", disabled: busy || !autoDirty, onClick: saveAuto }, busy ? t("saving") : t("save"))),
 				),
 				h(Section, {
 					title: t("whitelistSection"),
@@ -1279,6 +1308,7 @@ window.__ModuleLoader__.load({
 			if (d.to) parts.push("→ " + shortAddress(d.to));
 			if (d.outcome) parts.push(String(d.outcome));
 			if (d.via) parts.push("via " + String(d.via));
+			if (d.requestId) parts.push(String(d.requestId));
 			return parts.join(" · ");
 		}
 

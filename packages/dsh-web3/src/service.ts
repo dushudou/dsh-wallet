@@ -25,7 +25,7 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { MaxUint256, getAddress, formatEther, formatUnits } from 'ethers';
+import { MaxUint256, TypedDataEncoder, getAddress, formatEther, formatUnits, hashMessage, keccak256 } from 'ethers';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { TypedDataDomain, TypedDataField } from 'ethers';
 import { pinPepper, type SecretStore } from './keychain.js';
@@ -133,6 +133,16 @@ export interface CallContext {
   agent?: unknown;
 }
 
+/** Audit fields that tie one signing request's entries together (see `signTrail`). */
+interface SignTrail {
+  requestId: string;
+  /** Tool or caller that started the request. */
+  via: string;
+  callId?: string;
+  /** Signing policy preset in force (`custom` when edited by hand). */
+  preset: PolicyPresetId | 'custom';
+}
+
 /** Security checks for one operation (see dsh-web3/security). */
 export interface SecurityView {
   /** Strongest finding, or `none`. */
@@ -200,7 +210,8 @@ export interface PreparedView {
   recipient?: ResolvedRecipient;
   fee: { gasLimit: string; maxFee: string };
   decision: PolicyDecision;
-  willRequire: { humanApproval: boolean; dailyPin: boolean; blocked: boolean };
+  /** `aboveAutoBudget`: semi-managed mode will hold it (`needs-human`) instead of signing. */
+  willRequire: { humanApproval: boolean; dailyPin: boolean; blocked: boolean; aboveAutoBudget: boolean };
   /** Every finding as one line (strongest first); kept for older callers. */
   warnings: string[];
   /** Structured security findings, simulation, and per-check status. */
@@ -918,8 +929,10 @@ export class WalletService {
     const chain = getChain(plan.chainId);
     const maxFee = populated.gasLimit * (populated.maxFeePerGas ?? populated.gasPrice ?? 0n);
     const pin = await this.pinStatus();
+    const aboveAutoBudget = isBudgetHold(decision, security);
     const willRequire = {
-      humanApproval: decision.effect === 'ask',
+      humanApproval: decision.effect === 'ask' && !aboveAutoBudget,
+      aboveAutoBudget,
       dailyPin: pin.enabled && !pin.authorizedToday,
       blocked: decision.effect === 'deny',
     };
@@ -944,7 +957,9 @@ export class WalletService {
       human,
       next: willRequire.blocked
         ? blockedNext(decision)
-        : `Show the user the summary${security.findings.length > 0 ? ' AND every security finding' : ''}, get explicit confirmation, then call wallet_send_transaction with { preparedId: "${plan.id}" }.` +
+        : aboveAutoBudget
+          ? `Executing would return needs-human without signing. ${NEEDS_HUMAN_NEXT}`
+          : `Show the user the summary${security.findings.length > 0 ? ' AND every security finding' : ''}, get explicit confirmation, then call wallet_send_transaction with { preparedId: "${plan.id}" }.` +
           (severityRank(security.severity) >= severityRank('high') ? ' There are HIGH-risk findings: relay each one to the user word for word and let the user decide; never dismiss them yourself.' : '') +
           (willRequire.dailyPin ? ' The user must first unlock today\'s PIN in DSH Settings → Web3.' : '') +
           (willRequire.humanApproval ? ' A human approval prompt will appear when executing.' : ''),
@@ -1008,7 +1023,9 @@ export class WalletService {
     }
     const security = plan.security;
     const decision = escalateDecision(this.evaluate(account, plan.chainId, populated, plan.intent), security);
+    const trail = this.signTrail(context);
     await this.vault.auditAppend('sign.decision', {
+      ...trail,
       type: 'signTransaction',
       accountId: account.id,
       address: account.address,
@@ -1028,7 +1045,7 @@ export class WalletService {
       return (plan.result = { status: 'denied-by-policy', decision, summary: plan.headline, security, next: blockedNext(decision) });
     }
     if (isBudgetHold(decision, security)) {
-      await this.holdForUser(account, decision, plan.headline);
+      await this.holdForUser(account, decision, plan.headline, trail);
       return (plan.result = { status: 'needs-human', decision, summary: plan.headline, security, next: NEEDS_HUMAN_NEXT });
     }
     // Lock + PIN before approval: never ask the human to approve something
@@ -1044,7 +1061,7 @@ export class WalletService {
         agent: context.agent,
         reason: approvalTextFor(plan, populated, decision, security.findings),
       });
-      await this.vault.auditAppend('sign.approval', { outcome, accountId: account.id, address: account.address });
+      await this.vault.auditAppend('sign.approval', { ...trail, outcome, accountId: account.id, address: account.address });
       if (outcome !== 'allowed-once') {
         return (plan.result = {
           status: 'awaiting-approval-rejected',
@@ -1060,6 +1077,19 @@ export class WalletService {
     this.requireUnlocked();
     const unlocked = await this.vault.unlockedAccount(account.id);
     const signed = await coreSignTransaction(unlocked.wallet, populated);
+    await this.vault.auditAppend('sign.transaction', {
+      ...trail,
+      accountId: account.id,
+      address: account.address,
+      chainId: plan.chainId,
+      to: populated.to,
+      valueWei: populated.value.toString(),
+      nonce: populated.nonce,
+      dataHash: keccak256(populated.data),
+      txHash: signed.hash,
+      intent: plan.intent.kind,
+      ...(plan.replaces !== undefined ? { replaces: plan.replaces } : {}),
+    });
     // Journal BEFORE broadcast: if the node's answer is lost we still know the
     // hash, and the agent can check instead of paying twice.
     await this.vault.journal.add({
@@ -1307,7 +1337,10 @@ export class WalletService {
       account: { address: meta.address },
       message: input.message,
     });
+    const trail = this.signTrail(context);
+    const messageHash = hashMessage(input.message);
     await this.vault.auditAppend('sign.decision', {
+      ...trail,
       type: 'signMessage',
       accountId: meta.id,
       address: meta.address,
@@ -1315,6 +1348,7 @@ export class WalletService {
       ruleId: decision.ruleId,
       reason: decision.reason,
       messageLength: Buffer.byteLength(input.message, 'utf8'),
+      messageHash,
     });
     if (decision.effect === 'deny') return { status: 'denied-by-policy', decision, address: meta.address };
     this.requireUnlocked();
@@ -1328,7 +1362,7 @@ export class WalletService {
         agent: context.agent,
         reason: `Sign a personal message as ${meta.address} (${meta.label})?\n\nMessage (${String(Buffer.byteLength(input.message, 'utf8'))} bytes):\n${truncate(input.message, 400)}`,
       });
-      await this.vault.auditAppend('sign.approval', { outcome, accountId: meta.id, address: meta.address });
+      await this.vault.auditAppend('sign.approval', { ...trail, outcome, accountId: meta.id, address: meta.address });
       if (outcome !== 'allowed-once') {
         return { status: 'awaiting-approval-rejected', decision, approvalOutcome: outcome, address: meta.address };
       }
@@ -1336,7 +1370,7 @@ export class WalletService {
     this.requireUnlocked();
     const account = await this.vault.unlockedAccount(meta.id);
     const { signature } = await coreSignMessage(account.wallet, input.message);
-    await this.vault.auditAppend('sign.message', { accountId: meta.id, address: meta.address, signature });
+    await this.vault.auditAppend('sign.message', { ...trail, accountId: meta.id, address: meta.address, messageHash, signature });
     const result: SignMessageResult = { status: 'signed', decision, signature, address: meta.address };
     assertNoSecrets(result, [account.reveal().privateKey]);
     return result;
@@ -1380,7 +1414,12 @@ export class WalletService {
         ? notesOnly(input.extraFindings ?? [])
         : await this.assess(this.typedDataSubject(meta, chainId, domain, intent), {}, input.extraFindings ?? []);
     const decision = escalateDecision(policyDecision, security);
+    const trail = this.signTrail(context);
+    // Malformed types fail later at signing; the audit just goes without the hash.
+    const digest = attempt(() => TypedDataEncoder.hash(domain, types, input.value));
+    const primaryType = attempt(() => TypedDataEncoder.getPrimaryType(types));
     await this.vault.auditAppend('sign.decision', {
+      ...trail,
       type: 'signTypedData',
       accountId: meta.id,
       address: meta.address,
@@ -1389,13 +1428,16 @@ export class WalletService {
       guardrail: decision.guardrail,
       limit: decision.limit?.name,
       reason: decision.reason,
+      chainId,
       verifyingContract: domain.verifyingContract,
+      primaryType,
+      digest,
       intent: intent.kind,
       risk: decision.risk,
     });
     if (decision.effect === 'deny') return { status: 'denied-by-policy', decision, address: meta.address, intent, security };
     if (isBudgetHold(decision, security)) {
-      await this.holdForUser(meta, decision, intent.kind);
+      await this.holdForUser(meta, decision, intent.kind, trail);
       return { status: 'needs-human', decision, address: meta.address, intent, security };
     }
     this.requireUnlocked();
@@ -1409,7 +1451,7 @@ export class WalletService {
         agent: context.agent,
         reason: typedDataApprovalText(meta, domain, intent, typedDataJson, decision, input.purpose, security.findings),
       });
-      await this.vault.auditAppend('sign.approval', { outcome, accountId: meta.id, address: meta.address });
+      await this.vault.auditAppend('sign.approval', { ...trail, outcome, accountId: meta.id, address: meta.address });
       if (outcome !== 'allowed-once') {
         return { status: 'awaiting-approval-rejected', decision, approvalOutcome: outcome, address: meta.address, intent, security };
       }
@@ -1417,7 +1459,7 @@ export class WalletService {
     this.requireUnlocked();
     const account = await this.vault.unlockedAccount(meta.id);
     const { signature } = await coreSignTypedData(account.wallet, domain, types, input.value);
-    await this.vault.auditAppend('sign.typedData', { accountId: meta.id, address: meta.address, signature, intent: intent.kind });
+    await this.vault.auditAppend('sign.typedData', { ...trail, accountId: meta.id, address: meta.address, digest, signature, intent: intent.kind });
     // A signed transfer authorization is a payment: count it toward caps.
     if (intent.kind === 'transfer-authorization' && intent.token !== undefined && intent.amount !== undefined && intent.recipient !== undefined && chainId !== undefined) {
       await this.vault.recordSignedAuthorization({ account: meta, chainId, token: intent.token, tokenAmount: intent.amount, recipient: intent.recipient });
@@ -1554,13 +1596,22 @@ export class WalletService {
   // ── policy + hard limits ────────────────────────────────────────────────
 
   /**
-   * The signing decision: the policy first, then the hard limits on top. A
-   * violated limit turns any `allow` / `ask` into `deny` — no rule and no
-   * human click can sign past it.
+   * Audit fields shared by every entry of one signing request, so the
+   * decision, approval, hold and signature can be read back as one record.
    */
+  private signTrail(context: CallContext): SignTrail {
+    return {
+      requestId: `sig-${randomUUID()}`,
+      via: context.toolName,
+      ...(context.callId !== undefined ? { callId: context.callId } : {}),
+      preset: detectPreset(this.vault.getPolicy()) ?? 'custom',
+    };
+  }
+
   /** Record a hold for the user. Nothing is signed; no prompt blocks the agent. */
-  private async holdForUser(meta: Pick<AccountMeta, 'id' | 'address'>, decision: PolicyDecision, what: string): Promise<void> {
+  private async holdForUser(meta: Pick<AccountMeta, 'id' | 'address'>, decision: PolicyDecision, what: string, trail: SignTrail): Promise<void> {
     await this.vault.auditAppend('sign.needs-human', {
+      ...trail,
       accountId: meta.id,
       address: meta.address,
       what,
@@ -2203,7 +2254,15 @@ function isBudgetHold(decision: PolicyDecision, security: SecurityView): boolean
 }
 
 const NEEDS_HUMAN_NEXT =
-  'This is above the automatic budget, so nothing was signed. Tell the user the amount and why; they can approve it in DSH Settings → Web3, or raise the automatic budget there. Do not retry in a loop.';
+  'This is above the automatic budget, so nothing was signed. Tell the user the amount and why. To let it through they can raise the automatic budget in DSH Settings → Web3 → Limits, or switch the security mode there (strict asks per operation). Retry once only after the user says they changed it; never split the amount to fit the budget.';
+
+function attempt<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
 
 const POLICY_PRESETS: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay', 'agent-semi', 'agent-full'];
 const PRESET_RANK: Record<PolicyPresetId, number> = { locked: 0, strict: 1, micropay: 2, testnet: 2, power: 3, 'agent-semi': 4, 'agent-full': 5 };

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Transaction, getAddress, verifyTypedData } from 'ethers';
+import { Transaction, TypedDataEncoder, getAddress, hashMessage, keccak256, verifyTypedData } from 'ethers';
 import { WalletVault, policyPreset } from 'dsh-web3-core';
 import { applyWalletPlugin } from '../src/index.js';
 import { WalletService } from '../src/service.js';
@@ -151,6 +151,51 @@ describe('wallet service: send transaction under policy', () => {
       expect(provider.broadcasted).toHaveLength(0);
     });
 
+    it('semi: the preview says the operation will be held, not prompted', async () => {
+      await vault.setPolicy(policyPreset('agent-semi'));
+      const accountId = await importHardhatAccount();
+      const prepared = await service.prepareTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: BETWEEN });
+      expect(prepared.willRequire).toMatchObject({ aboveAutoBudget: true, humanApproval: false, blocked: false });
+      expect(prepared.next).toContain('needs-human');
+    });
+
+    it('semi: a blank automatic budget leaves only the hard ceiling; 0 holds every operation', async () => {
+      await vault.setPolicy(policyPreset('agent-semi'));
+      const accountId = await importHardhatAccount();
+      const limits = vault.getLimits();
+      await vault.setLimits({ ...limits, auto: { ...limits.auto, native: {} } });
+      const blank = await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: BETWEEN }, approval);
+      expect(blank.status).toBe('signed-broadcast');
+
+      await vault.setLimits({ ...limits, auto: { ...limits.auto, native: { ETH: { perTx: '0' } } } });
+      const zero = await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: '1000' }, approval);
+      expect(zero.status).toBe('needs-human');
+      expect(approval.requests).toHaveLength(0);
+    });
+
+    it('the panel asks for the PIN to clear or raise the automatic budget, not to lower it', async () => {
+      const limits = vault.getLimits();
+      const cleared = { ...limits, auto: { ...limits.auto, native: {} } };
+      await expect(service.setLimitsFromPanel(cleared)).rejects.toMatchObject({ code: 'PIN_SETUP_REQUIRED' });
+      await service.pinSetup('1234');
+      await expect(service.setLimitsFromPanel(cleared, '0000')).rejects.toMatchObject({ code: 'PIN_INVALID' });
+      await service.setLimitsFromPanel(cleared, '1234');
+      const lowered = await service.setLimitsFromPanel({ ...cleared, auto: { ...cleared.auto, native: { ETH: { perTx: '0' } } } });
+      expect(lowered.auto.native.ETH).toEqual({ perTx: '0' });
+    });
+
+    it('semi: the hold is audited under the same requestId as its decision', async () => {
+      await vault.setPolicy(policyPreset('agent-semi'));
+      const accountId = await importHardhatAccount();
+      await service.sendTransaction({ from: accountId, chainId: 1, to: RECIPIENT, value: BETWEEN }, approval, { toolName: 'wallet_send_transaction', callId: 'call-7' });
+      const entries = await service.recentAudit(50);
+      const hold = entries.find((e) => e.kind === 'sign.needs-human');
+      const decision = entries.find((e) => e.kind === 'sign.decision');
+      expect(hold?.detail).toMatchObject({ via: 'wallet_send_transaction', callId: 'call-7', preset: 'agent-semi' });
+      expect(hold?.detail.requestId).toBe(decision?.detail.requestId);
+      expect(entries.some((e) => e.kind === 'sign.transaction')).toBe(false);
+    });
+
     it('full: signs the same operation unattended (no automatic budget)', async () => {
       await vault.setPolicy(policyPreset('agent-full'));
       const accountId = await importHardhatAccount();
@@ -241,6 +286,39 @@ describe('wallet service: message signing under policy', () => {
     expect(result.status).toBe('signed');
     expect(result.signature).toMatch(/^0x[0-9a-f]{130}$/i);
     expect(approval.requests).toHaveLength(1);
+  });
+
+  it('ties the audit entries of one signing request together', async () => {
+    const accountId = await importHardhatAccount();
+    approval.outcome = 'allowed-once';
+    await service.signMessage({ account: accountId, message: 'hello' }, approval);
+    const sent = await service.sendTransaction({ from: accountId, chainId: 31337, to: RECIPIENT, value: '1000' }, approval);
+    const entries = await service.recentAudit(50);
+
+    const message = entries.filter((e) => e.detail.via === 'wallet_sign_message');
+    expect(message.map((e) => e.kind).sort()).toEqual(['sign.approval', 'sign.decision', 'sign.message']);
+    expect(new Set(message.map((e) => e.detail.requestId)).size).toBe(1);
+    expect(message.every((e) => e.detail.preset === 'strict')).toBe(true);
+    expect(message.find((e) => e.kind === 'sign.message')?.detail.messageHash).toBe(hashMessage('hello'));
+
+    const signed = entries.find((e) => e.kind === 'sign.transaction');
+    expect(signed?.detail).toMatchObject({ txHash: sent.txHash, nonce: 0, dataHash: keccak256('0x') });
+    const decision = entries.find((e) => e.kind === 'sign.decision' && e.detail.type === 'signTransaction');
+    expect(decision?.detail.requestId).toBe(signed?.detail.requestId);
+  });
+
+  it('audits the EIP-712 digest and primary type of signed typed data', async () => {
+    const accountId = await importHardhatAccount();
+    approval.outcome = 'allowed-once';
+    const domain = { name: 'Test', version: '1', chainId: 1 };
+    const types = { Mail: [{ name: 'contents', type: 'string' }] };
+    const value = { contents: 'hi' };
+    await service.signTypedData({ account: accountId, domain, types, value }, approval);
+    const entries = await service.recentAudit(50);
+    const signed = entries.find((e) => e.kind === 'sign.typedData');
+    const decision = entries.find((e) => e.kind === 'sign.decision' && e.detail.type === 'signTypedData');
+    expect(signed?.detail.digest).toBe(TypedDataEncoder.hash(domain, types, value));
+    expect(decision?.detail).toMatchObject({ primaryType: 'Mail', chainId: 1, requestId: signed?.detail.requestId });
   });
 
   it('refuses a message when approval is rejected', async () => {

@@ -49,7 +49,7 @@ describe('settings panel bundle', () => {
       expect(zh, `missing zh "${key}"`).toHaveProperty([key]);
       expect(en, `missing en "${key}"`).toHaveProperty([key]);
     }
-    for (const preset of ['strict', 'micropay', 'testnet', 'power', 'locked', 'custom']) {
+    for (const preset of ['agent-semi', 'agent-full', 'strict', 'micropay', 'testnet', 'power', 'locked', 'custom']) {
       expect(zh).toHaveProperty([`preset_${preset}`]);
       expect(zh).toHaveProperty([`preset_${preset}Desc`]);
     }

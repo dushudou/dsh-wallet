@@ -2,6 +2,21 @@
 
 All notable changes to `dsh-web3` (the DSH bundle) and `dsh-web3-core` (the library). Dates are npm publish dates. The project follows [Semantic Versioning](https://semver.org/); while in `0.x`, a minor version may contain breaking changes, which are listed under **Breaking**.
 
+## dsh-web3 0.9.1 — 2026-10-17
+
+### Changed
+
+- **Signing audit trail.** Every audit entry of one signing request (`sign.decision`, `sign.approval`, `sign.needs-human`, and the new `sign.transaction`, plus `sign.message` / `sign.typedData`) carries the same `requestId`, the tool that started it (`via`, `callId`) and the policy preset in force (`preset`). Entries also record what was signed: the EIP-191 `messageHash`, the EIP-712 `digest` / `primaryType` / `chainId`, and for transactions the `nonce`, calldata `dataHash` and `txHash` (which links to `sign.broadcast`). The panel's audit log shows the `requestId`.
+- The bundled skill covers the semi-managed and fully managed modes, the automatic budget and the `needs-human` status, and explains the audit trail.
+- `wallet_policy_set` describes the agent presets and the tightening prompt states what the chosen preset does.
+
+### Fixed
+
+- A preview of an operation above the automatic budget (semi-managed) said an approval prompt would appear, but executing returns `needs-human` without prompting. The preview now sets `willRequire.aboveAutoBudget` and says so.
+- The `needs-human` hint told the user they could approve the held operation in the settings panel, which has no such control. It now points to raising the automatic budget or switching the security mode, and tells the agent not to split the amount.
+- The panel's copy for the semi-managed mode and the automatic budget said held operations "wait for your confirmation"; they are not signed and run once the user raises the budget or switches modes. It also said a blank budget item meant no automatic allowance, while a blank item has no automatic budget (only the hard ceiling applies); the copy now says so and that 0 never signs that item automatically. The READMEs now recommend `agent-semi` and describe the automatic budget and the audit trail.
+- The settings panel did not offer the `agent-semi` / `agent-full` presets or a way to edit the automatic budget (`limits.auto`), so neither mode could be chosen from Settings → Web3 → Limits. Both presets are now listed first (semi-managed recommended) and the Limits tab has an "Automatic budget" section; raising it needs the PIN.
+
 ## dsh-web3 0.9.0 / dsh-web3-core 0.5.0 — 2026-10-16
 
 ### Breaking

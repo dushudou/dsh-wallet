@@ -131,6 +131,17 @@ export interface BuildToolsOptions {
 
 const PRESETS: PolicyPresetId[] = ['locked', 'strict', 'testnet', 'power', 'micropay', 'agent-semi', 'agent-full'];
 
+/** What each preset means for the user, for the tighten-policy approval prompt. */
+const PRESET_EFFECT: Record<PolicyPresetId, string> = {
+  locked: 'All signing will be refused until you change it in Settings → Web3.',
+  strict: 'Every signing request will ask for your approval.',
+  micropay: 'Every signing request will ask for your approval, except small x402 USDC payments.',
+  testnet: 'Small testnet operations sign automatically; mainnet asks every time.',
+  power: 'Small mainnet native transfers sign automatically; tokens and approvals ask.',
+  'agent-semi': 'The agent signs on its own within the automatic budget; anything above it is held for you.',
+  'agent-full': 'The agent signs on its own up to the hard limits.',
+};
+
 const accountSelector: ParamSpec = { type: 'string', description: 'Account id, address, or exact label (see wallet_list).', required: true };
 const chainId: ParamSpec = {
   type: 'number',
@@ -208,7 +219,7 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
   const ctxOf = (toolName: string, ctx: ToolCallContext) => ({ toolName, callId: ctx.callId, signal: ctx.signal, agent: ctx.agent });
 
   const panelPolicyMessage =
-    '放宽安全设置（切换到 testnet / power / micropay 预设、自定义规则、提高限额、加入白名单）只能由用户在 DSH 设置 → Web3 → 限额 中完成，并需要输入 PIN 确认。请把这一点告诉用户，不要尝试其他方式绕过。';
+    '放宽安全设置（切换到更自主的安全模式，如半托管 / 全托管 / testnet / power / micropay，自定义规则、提高限额或自动预算、加入白名单）只能由用户在 DSH 设置 → Web3 → 限额 中完成，并需要输入 PIN 确认。请把这一点告诉用户，不要尝试其他方式绕过。';
   const panelBackupMessage =
     '出于安全考虑，助记词/私钥不会通过对话返回（对话内容会发送给模型服务并写入会话日志）。请引导用户前往 DSH 设置 → Web3 → 账户，点击对应账户的「备份」，在界面中输入 PIN 后查看。';
 
@@ -710,7 +721,7 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
     {
       name: 'wallet_policy_set',
       description:
-        'Tighten the signing policy with a preset: locked (no signing at all) or strict (every operation asks a human; the default). Requires human approval + daily PIN. Loosening — testnet / power / micropay presets, custom rules, raising limits, whitelisting — is never done by the agent: it returns status "use-panel"; tell the user to change it in DSH Settings → Web3 → Limits (PIN-confirmed). Only call when the user explicitly asks.',
+        'Tighten the signing policy with a preset, e.g. agent-full → agent-semi, anything → strict (every operation asks a human) or locked (no signing at all). Fresh vaults start in agent-semi. Requires human approval + daily PIN. Loosening — a more autonomous preset (agent-semi / agent-full / power / testnet / micropay from a stricter one), custom rules, raising limits or the automatic budget, whitelisting — is never done by the agent: it returns status "use-panel"; tell the user to change it in DSH Settings → Web3 → Limits (PIN-confirmed). Only call when the user explicitly asks.',
       parameters: {
         preset: { type: 'string', enum: PRESETS, description: 'Preset to apply. Only tightening changes are applied here.', required: true },
       },
@@ -727,7 +738,7 @@ export function buildTools(options: BuildToolsOptions): WalletTool[] {
         }
         const outcome = await approval.request({
           ...ctxOf('wallet_policy_set', ctx),
-          reason: `Tighten the wallet signing policy to preset "${preset}"? ${preset === 'locked' ? 'All signing will be refused until you change it in Settings → Web3.' : 'Every signing request will ask for your approval.'}`,
+          reason: `Tighten the wallet signing policy to preset "${preset}"? ${PRESET_EFFECT[preset]}`,
         });
         if (outcome !== 'allowed-once') {
           await service.vault.auditAppend('tool.policy_set_denied', { outcome });
